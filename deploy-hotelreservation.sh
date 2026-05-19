@@ -1,0 +1,77 @@
+#!/bin/bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEATHSTAR_DIR="$(realpath "$SCRIPT_DIR/../DeathStarBench")"
+HOTEL_RES_DIR="$DEATHSTAR_DIR/hotelReservation"
+WRK2_DIR="$DEATHSTAR_DIR/wrk2"
+KIND_CLUSTER="burst-detection-lab"
+IMAGE="deathstarbench/hotel-reservation:latest"
+
+# ── Phase 1: Host load-generation prerequisites ───────────────────────────
+
+echo "=== Phase 1: Host load-generation prerequisites ==="
+
+if ! command -v luarocks &>/dev/null; then
+  echo "Installing luarocks..."
+  sudo apt-get install -y luarocks
+else
+  echo "  [OK] luarocks"
+fi
+
+if ! luarocks list 2>/dev/null | grep -q "^luasocket"; then
+  echo "Installing luasocket..."
+  sudo luarocks install luasocket
+else
+  echo "  [OK] luasocket"
+fi
+
+# ── Phase 2: Build wrk2 ───────────────────────────────────────────────────
+
+# echo "=== Phase 2: Build wrk2 ==="
+
+# if [ ! -f "$WRK2_DIR/wrk" ]; then
+#   echo "Installing wrk2 build dependencies..."
+#   sudo apt-get install -y build-essential libssl-dev
+
+#   if [ ! -f "$WRK2_DIR/deps/luajit/src/Makefile" ]; then
+#     echo "Initializing LuaJIT submodule..."
+#     git -C "$DEATHSTAR_DIR" submodule update --init --recursive
+#   fi
+
+#   echo "Building wrk2..."
+#   make -C "$WRK2_DIR"
+# else
+#   echo "  [OK] wrk2 already built"
+# fi
+
+# ── Phase 3: Build and load application image into kind ───────────────────
+
+echo "=== Phase 3: Build HotelReservation image ==="
+
+docker build -t "$IMAGE" "$HOTEL_RES_DIR"
+
+echo "Loading image into kind cluster '$KIND_CLUSTER'..."
+kind load docker-image "$IMAGE" --name "$KIND_CLUSTER"
+
+# ── Phase 4: Deploy HotelReservation to Kubernetes ───────────────────────
+
+echo "=== Phase 4: Deploy HotelReservation ==="
+
+kubectl apply -Rf "$HOTEL_RES_DIR/kubernetes/"
+
+echo "Waiting for all pods to be ready (timeout 5 min)..."
+kubectl wait --for=condition=ready pod --all --timeout=300s
+
+# ── Done ──────────────────────────────────────────────────────────────────
+
+echo ""
+echo "=== Deployment complete ==="
+echo ""
+echo "Expose the frontend:"
+echo "  kubectl port-forward svc/frontend 5000:5000"
+echo ""
+echo "Run load test (in a separate terminal after port-forward):"
+echo "  $WRK2_DIR/wrk -D exp -t 2 -c 2 -d 30 -L \\"
+echo "    -s $HOTEL_RES_DIR/wrk2/scripts/hotel-reservation/mixed-workload_type_1.lua \\"
+echo "    http://localhost:5000 -R 100"

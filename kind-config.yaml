@@ -1,0 +1,10 @@
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: burst-detection-lab
+networking:
+  disableDefaultCNI: true       # We install Cilium instead
+  kubeProxyMode: none           # Cilium replaces kube-proxy
+nodes:
+- role: control-plane
+- role: worker
+- role: worker
