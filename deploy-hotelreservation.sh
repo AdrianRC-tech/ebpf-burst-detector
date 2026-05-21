@@ -6,7 +6,7 @@ DEATHSTAR_DIR="$(realpath "$SCRIPT_DIR/../DeathStarBench")"
 HOTEL_RES_DIR="$DEATHSTAR_DIR/hotelReservation"
 WRK2_DIR="$DEATHSTAR_DIR/wrk2"
 KIND_CLUSTER="burst-detection-lab"
-IMAGE="deathstarbench/hotel-reservation:latest"
+IMAGE="${HOTEL_IMAGE:-deathstarbench/hotel-reservation:kind-local}"
 
 # ── Phase 1: Host load-generation prerequisites ───────────────────────────
 
@@ -49,7 +49,7 @@ fi
 
 echo "=== Phase 3: Build HotelReservation image ==="
 
-docker build -t "$IMAGE" "$HOTEL_RES_DIR"
+docker build --provenance=false -t "$IMAGE" "$HOTEL_RES_DIR"
 
 echo "Loading image into kind cluster '$KIND_CLUSTER'..."
 kind load docker-image "$IMAGE" --name "$KIND_CLUSTER"
@@ -60,8 +60,16 @@ echo "=== Phase 4: Deploy HotelReservation ==="
 
 kubectl apply -Rf "$HOTEL_RES_DIR/kubernetes/"
 
+# K8s manifests hardcode :latest; override each deployment to use our local tag.
+# Non-:latest tags default to imagePullPolicy=IfNotPresent, so kubelets use the
+# kind-loaded image without contacting Docker Hub.
+echo "Updating deployments to use local image $IMAGE..."
+for svc in frontend geo profile rate recommendation reservation search user; do
+  kubectl set image deployment/"$svc" "hotel-reserv-$svc=$IMAGE" 2>/dev/null || true
+done
+
 echo "Waiting for all pods to be ready (timeout 5 min)..."
-kubectl wait --for=condition=ready pod --all --timeout=300s
+kubectl wait --for=condition=ready pod --all --timeout=400s
 
 # ── Done ──────────────────────────────────────────────────────────────────
 
