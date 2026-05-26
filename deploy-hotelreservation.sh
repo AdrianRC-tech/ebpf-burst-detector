@@ -2,9 +2,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DEATHSTAR_DIR="$(realpath "$SCRIPT_DIR/../DeathStarBench")"
-HOTEL_RES_DIR="$DEATHSTAR_DIR/hotelReservation"
-WRK2_DIR="$DEATHSTAR_DIR/wrk2"
+HOTEL_RES_DIR="$(realpath "$SCRIPT_DIR/benchmark/hotelReservation/")"
+WRK2_DIR="$(realpath "$SCRIPT_DIR/wrk2")"
 KIND_CLUSTER="burst-detection-lab"
 IMAGE="${HOTEL_IMAGE:-deathstarbench/hotel-reservation:kind-local}"
 
@@ -58,6 +57,7 @@ kind load docker-image "$IMAGE" --name "$KIND_CLUSTER"
 
 echo "=== Phase 4: Deploy HotelReservation ==="
 
+kind export kubeconfig --name "$KIND_CLUSTER"
 kubectl apply -Rf "$HOTEL_RES_DIR/kubernetes/"
 
 # K8s manifests hardcode :latest; override each deployment to use our local tag.

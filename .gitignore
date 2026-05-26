@@ -434,3 +434,14 @@ CLAUDE.md
 
 # Specs
 docs/superpowers/specs/
+
+# Burst Detector — generated artifacts
+/bin/
+/ebpf/headers/vmlinux.h
+/cmd/ingress-counter/bpf_bpfel.go
+/cmd/ingress-counter/bpf_bpfel.o
+/cmd/ingress-counter/bpf_bpfeb.go
+/cmd/ingress-counter/bpf_bpfeb.o
+
+# Modified version of hotelReservation - DeathStarBench
+/benchmark/
