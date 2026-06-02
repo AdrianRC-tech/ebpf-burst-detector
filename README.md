@@ -198,6 +198,48 @@ This unpins the shared map. Both binaries must be stopped first.
 
 ---
 
+## Monitoring (Prometheus + Grafana)
+
+`cluster-setup.sh` deploys a lean monitoring stack in the `monitoring` namespace:
+
+- **Prometheus** (`prometheus-community/prometheus`) — built-in jobs scrape the kubelet `/metrics/cadvisor` endpoint (per-pod ingress bytes/packets aggregated to node level in PromQL) and the Hubble `hubble-metrics` service (port 9965, dropped-packet counts). No operator, no ServiceMonitor CRDs.
+- **Grafana** — pre-loads the *CUSUM Layer 1 Tuning* dashboard with three panels.
+
+### Access
+
+```bash
+kubectl port-forward -n monitoring svc/grafana          3000:80   # admin / admin
+kubectl port-forward -n monitoring svc/prometheus-server 9090:80
+```
+
+Open http://localhost:3000 → Dashboards → default → *CUSUM Layer 1 Tuning*.
+
+### Dashboard panels
+
+| Panel | Purpose |
+|---|---|
+| Node bytes/sec | Primary CUSUM tuning signal; read `mu_0` from the steady-state value |
+| Node packets/sec | Directional context (GRO-coalesced — not wire-exact) |
+| Cilium drop bytes/sec | **Must stay ~0** during load runs; BPF map counter (lossless) — non-zero = lossy measurement |
+
+> **How pod churn is handled automatically:** cAdvisor's `interface` label is the in-pod name (`eth0`), identical for every pod — pod identity lives in the `pod`/`namespace` labels. The panels use `namespace="default", pod!="", interface="eth0"` which matches every app pod that exists now or appears later, with no per-pod configuration. New pods are picked up automatically by Prometheus service discovery; deleted pods go stale. `namespace="default"` also excludes host-network system pods (cilium-agent, apiserver…) that would otherwise double-count traffic against the eBPF measurement.
+
+### Resolution ceiling
+
+cAdvisor housekeeping runs every ~10 s — **~100× coarser than the 100 ms CUSUM window**. These panels characterise the load-generator *envelope* and steady-state baseline. Actual per-window validation comes from the ring-buffer → offline CSV path.
+
+### Deriving `mu_0`
+
+Run a steady `wrk2` load and read off the sustained bytes/sec value for your node:
+
+```
+mu_0 [bytes/window] = bytes_per_sec / 10    # 100 ms windows = 10 windows/sec
+```
+
+Pass to `--mu0` when launching `cusum-detector`.
+
+---
+
 ## Test
 
 ```bash

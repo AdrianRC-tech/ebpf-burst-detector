@@ -446,5 +446,8 @@ docs/superpowers/specs/
 # Modified version of hotelReservation - DeathStarBench
 /benchmark/
 
-# Generate binaries
-/bin
+# eBPF Programs Generated binaries
+bin/
+
+# wrk2 HTTP Benchmarking tool
+wrk2/ 

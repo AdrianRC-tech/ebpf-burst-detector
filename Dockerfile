@@ -12,6 +12,6 @@ RUN apt-get update \
  && curl -fsSL "https://github.com/Netflix/bpftop/releases/download/v${BPFTOP_VERSION}/bpftop" \
         -o /usr/local/bin/bpftop \
  && chmod +x /usr/local/bin/bpftop \
- && apt-get purge -y curl \
  && apt-get autoremove -y \
  && rm -rf /var/lib/apt/lists/*
+gea

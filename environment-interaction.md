@@ -7,6 +7,12 @@ kubectl port-forward -n kube-system svc/hubble-ui 12000:80
 # Make Jaeger UI accesible
 kubectl port-forward svc/jaeger 16686:16686
 
+# Make Grafana accessible (login: admin / admin)
+kubectl port-forward -n monitoring svc/grafana 3000:80
+
+# Make Prometheus accessible
+kubectl port-forward -n monitoring svc/prometheus-server 9090:80
+
 
 # Stop kind cluster
 docker stop $(docker ps -aq --filter "label=io.x-k8s.kind.cluster=burst-detection-lab")

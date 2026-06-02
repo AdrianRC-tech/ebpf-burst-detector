@@ -1,0 +1,24 @@
+# Disabled components (not needed for bytes/packets/drop scope):
+#   alertmanager, pushgateway, node-exporter, kube-state-metrics
+
+# Scrape coverage via built-in jobs:
+#   kubernetes-nodes-cadvisor   — kubelet /metrics/cadvisor: per-pod RX bytes/packets
+#   kubernetes-service-endpoints — picks up hubble-metrics svc (prometheus.io/scrape: "true", port 9965)
+#   kubernetes-pods              — picks up cilium-agent pods (prometheus.io/scrape: "true", port 9962)
+
+alertmanager:
+  enabled: false
+
+prometheus-pushgateway:
+  enabled: false
+
+prometheus-node-exporter:
+  enabled: false
+
+kube-state-metrics:
+  enabled: false
+
+server:
+  global:
+    scrape_interval: 15s       # matches cAdvisor housekeeping cadence (~10 s); faster scrapes repeat values
+    evaluation_interval: 15s
