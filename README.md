@@ -5,13 +5,21 @@ detector for Kubernetes microservices. Layer 1 is the measurement substrate: a
 TCX-attached BPF program that counts ingress bytes per pod via the host-side
 veth, plus the userspace loader that observes the resulting per-CPU counter.
 
-**Current iteration: 1.** The data-path BPF program (`ebpf/ingress_counter.bpf.c`)
-and its userspace driver (`cmd/ingress-counter/`) are in place. The CUSUM
-detection program — the part that actually decides "burst onset" / "burst
-drain" — is iteration 2, not yet implemented.
+**Current iteration: 2.** Both binaries are in place:
+
+- `cmd/ingress-counter/` — TCX data-path program that counts ingress bytes per
+  pod via the host-side veth (iteration 1).
+- `cmd/cusum-detector/` — timer-triggered two-sided CUSUM detector running
+  entirely in kernel space; reads the shared per-CPU counter every window and
+  emits onset/drain events to userspace via a ring buffer (iteration 2).
+
+The two binaries share `node_ingress_bytes` automatically through the BPF
+filesystem (`LIBBPF_PIN_BY_NAME` declaration + `PinPath: /sys/fs/bpf/burst-detector`
+on both loaders). Start them in either order — whichever loads first creates
+the pinned map; the other reuses it.
 
 Architectural rationale lives in `CLAUDE.md` and `docs/superpowers/specs/`. This
-README covers only how to build, run, and validate the iteration-1 binary.
+README covers how to build, run, and validate both binaries.
 
 ---
 
@@ -50,17 +58,17 @@ One-off setup (records `bpf2go` as a Go tool dependency in `go.mod`):
 go get -tool github.com/cilium/ebpf/cmd/bpf2go
 ```
 
-Then the build is two commands:
+Then build both binaries:
 
 ```bash
-go generate ./cmd/ingress-counter/
-go build -o bin/ingress-counter ./cmd/ingress-counter
+go generate ./cmd/ingress-counter/ ./cmd/cusum-detector/
+go build -o bin/ingress-counter  ./cmd/ingress-counter
+go build -o bin/cusum-detector   ./cmd/cusum-detector
 ```
 
-The `go generate` step invokes `bpf2go` (cached by Go's tool machinery —
-rebuilt only when the tool version in `go.mod` changes) to compile
-`ebpf/ingress_counter.bpf.c` and emit Go bindings at
-`cmd/ingress-counter/bpf_bpfel.{go,o}`.
+`go generate` invokes `bpf2go` (cached by Go's tool machinery — rebuilt only
+when the tool version in `go.mod` changes) to compile each BPF C source and
+emit Go bindings at `cmd/*/bpf_bpfel.{go,o}`.
 
 If `ebpf/headers/vmlinux.h` is missing, regenerate it first (see below).
 
@@ -139,6 +147,54 @@ In the loader's output, `delta_bytes` should track each request and
 `environment-interaction.md` lists port-forward commands for HotelReservation
 UI, Hubble UI, and Jaeger if you want to observe traffic from the cluster's
 own observability stack alongside the loader's readings.
+
+---
+
+## Run the CUSUM burst detector (iteration 2)
+
+The detector loads alongside `ingress-counter` and shares `node_ingress_bytes`
+via the pinned map at `/sys/fs/bpf/burst-detector/node_ingress_bytes`. Copy
+the binary into the kind node and run it inside the same netns as
+`ingress-counter`:
+
+```bash
+docker cp bin/cusum-detector burst-detection-lab-worker:/usr/local/bin/cusum-detector
+
+docker exec -it burst-detection-lab-worker /usr/local/bin/cusum-detector \
+    --mu0      500000 \
+    --k        250000 \
+    --h-onset  2000000 \
+    --h-drain  2000000 \
+    --window   10ms
+```
+
+Flags (all CUSUM parameters are baked into `.rodata` at load time — change
+them by restarting the binary, not by editing the running program):
+
+| Flag | Unit | Meaning |
+|---|---|---|
+| `--mu0` | bytes/window | baseline byte rate per CUSUM window |
+| `--k` | bytes | slack factor — typically half the step you want to detect |
+| `--h-onset` | bytes | threshold on `upper_sum` that triggers onset |
+| `--h-drain` | bytes | threshold on `lower_sum` that triggers drain |
+| `--window` | duration | CUSUM window (e.g. `10ms`, `5ms`) |
+
+Output is structured JSON to stderr, one line per arming event plus one line
+per onset/drain transition. The detector also exposes a single-byte `burst_flag`
+BPF map (0 = quiescent, 1 = burst) as Layer 1's architectural output for
+downstream consumers.
+
+**Start order is irrelevant.** Whichever process loads first creates the pinned
+`node_ingress_bytes` map at `/sys/fs/bpf/burst-detector/`; the other reuses it.
+
+**To reset all shared state** (e.g. for a fresh CUSUM tuning run with no
+historical counter accumulation):
+
+```bash
+sudo rm -rf /sys/fs/bpf/burst-detector
+```
+
+This unpins the shared map. Both binaries must be stopped first.
 
 ---
 

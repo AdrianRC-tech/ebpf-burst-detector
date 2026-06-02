@@ -6,5 +6,8 @@ networking:
   kubeProxyMode: none           # Cilium replaces kube-proxy
 nodes:
 - role: control-plane
+  image: burst-detector-node:latest
 - role: worker
+  image: burst-detector-node:latest
 - role: worker
+  image: burst-detector-node:latest

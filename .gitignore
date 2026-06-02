@@ -445,3 +445,6 @@ docs/superpowers/specs/
 
 # Modified version of hotelReservation - DeathStarBench
 /benchmark/
+
+# Generate binaries
+/bin

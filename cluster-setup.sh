@@ -1,4 +1,5 @@
 #!/bin/bash
+set -e
 
 echo "System requirements check for eBPF-based burst detection lab..."
 
@@ -28,7 +29,12 @@ if [ "$MISSING" -ne 0 ]; then
   exit 1
 fi
 
-echo "All tools are installed. Creating Kubernetes cluster with kind..."
+echo "All tools are installed. Building custom kind node image with bpftool/bpftop..."
+
+NODE_IMAGE_TAG="burst-detector-node:latest"
+docker build -t "${NODE_IMAGE_TAG}" .
+
+echo "Creating Kubernetes cluster with kind..."
 
 kind create cluster --config=kind-config.yaml
 

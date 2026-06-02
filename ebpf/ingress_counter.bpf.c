@@ -1,14 +1,6 @@
-#include "vmlinux.h"
-#include <bpf/bpf_helpers.h>
+#include "shared_maps.h"
 
 #define TC_ACT_OK 0
-
-struct {
-	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-	__type(key, __u32);
-	__type(value, __u64);
-	__uint(max_entries, 1);
-} node_ingress_bytes SEC(".maps");
 
 SEC("tc")
 int ingress_counter(struct __sk_buff *skb)

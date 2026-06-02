@@ -4,11 +4,17 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/rlimit"
 )
+
+// bpfPinDir is the BPF filesystem directory that holds maps shared with the
+// cusum-detector binary. Both binaries must agree on this path; node_ingress_bytes
+// uses LIBBPF_PIN_BY_NAME and is pinned at bpfPinDir/node_ingress_bytes.
+const bpfPinDir = "/sys/fs/bpf/burst-detector"
 
 // attachment owns the live BPF objects and the TCX link that holds the
 // data-path program attached to a single host-side veth's egress hook.
@@ -33,8 +39,14 @@ func attachIngressCounter(ifname string) (*attachment, error) {
 		return nil, fmt.Errorf("resolving interface %q: %w", ifname, err)
 	}
 
+	if err := os.MkdirAll(bpfPinDir, 0o755); err != nil {
+		return nil, fmt.Errorf("creating pin dir %s: %w", bpfPinDir, err)
+	}
+
 	var objs bpfObjects
-	if err := loadBpfObjects(&objs, nil); err != nil {
+	if err := loadBpfObjects(&objs, &ebpf.CollectionOptions{
+		Maps: ebpf.MapOptions{PinPath: bpfPinDir},
+	}); err != nil {
 		return nil, fmt.Errorf("loading bpf objects: %w", err)
 	}
 
