@@ -13,7 +13,6 @@ kubectl port-forward -n monitoring svc/grafana 3000:80
 # Make Prometheus accessible
 kubectl port-forward -n monitoring svc/prometheus-server 9090:80
 
-
 # Stop kind cluster
 docker stop $(docker ps -aq --filter "label=io.x-k8s.kind.cluster=burst-detection-lab")
 
@@ -22,3 +21,6 @@ docker start $(docker ps -aq --filter "label=io.x-k8s.kind.cluster=burst-detecti
 
 # Configure kubectl again
 kubectl cluster-info --context kind-burst-detection-lab
+
+# Run load benchmark
+./wrk2/wrk" -D exp -t 2 -c 10 -d 60 -L -s .benchmark/hotelReservation/wrk2/scripts/hotel-reservation/mixed-workload_type_1.lua http://localhost:5000 -R 100

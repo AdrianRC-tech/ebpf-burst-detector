@@ -450,4 +450,7 @@ docs/superpowers/specs/
 bin/
 
 # wrk2 HTTP Benchmarking tool
-wrk2/ 
+wrk2/
+
+# Notes
+docs/experiment-methodology.md

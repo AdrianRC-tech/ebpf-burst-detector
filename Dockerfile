@@ -14,4 +14,3 @@ RUN apt-get update \
  && chmod +x /usr/local/bin/bpftop \
  && apt-get autoremove -y \
  && rm -rf /var/lib/apt/lists/*
-gea

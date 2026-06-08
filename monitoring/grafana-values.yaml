@@ -37,7 +37,7 @@ dashboards:
     cusum-tuning:
       json: |
         {
-          "title": "CUSUM Layer 1 Tuning",
+          "title": "Per-node ingress metrics",
           "uid": "cusum-l1-tuning",
           "schemaVersion": 39,
           "version": 1,
@@ -129,3 +129,11 @@ dashboards:
             }
           ]
         }
+    cilium-operator-metrics:
+      gnetId: 16612
+      revision: 1
+      datasource: Prometheus
+    ciliug-agent-metrics:
+      gnetId: 16611
+      revision: 1
+      datasource: Prometheus
