@@ -1,6 +1,11 @@
+# Cilium performance tunning applied based on https://docs.cilium.io/en/latest/operations/performance/tuning/#tuning-guide
+routingMode: native
+ipv4NativeRoutingCIDR: "10.0.0.0/8"   # traffic within pod CIDR is not masqueraded; must be superset of all allocatable pod IPs
+autoDirectNodeRoutes: true            # native mode has no tunnel; installs per-node routes to other nodes' pod /24s (valid: all kind nodes are L2-adjacent on the same Docker bridge)
 kubeProxyReplacement: true
 k8sServiceHost: burst-detection-lab-control-plane
 k8sServicePort: 6443
+bpfClockProbe: true
 
 prometheus:
   enabled: true            # cilium-agent metrics on port 9962; pods get prometheus.io/scrape annotation
@@ -15,3 +20,24 @@ hubble:
     enabled: true
   ui:
     enabled: true
+
+bpf:
+  masquerade: true  # Pre-requirement  to enable BPF Host-routing (bpf_redirect_peer), skipping iptables for host routing (Legacy mode): https://docs.cilium.io/en/latest/operations/performance/tuning/#ebpf-host-routing
+  datapathMode: netkit # Replace veths with netkit (performance tunning cilium, kernel 6.8> required)
+  distributedLRU:
+    enabled: true # Cilium tunning -> Enable distributed LRU for BPF datapath, which allows to share the same LRU map across all nodes, improving performance and reducing memory usage.
+  mapDynamicSizeRatio: 0.08 # Cilium tunning -> Increase the dynamic size ratio for BPF maps, allowing them to grow up to 50% of their maximum size, which can help prevent out-of-memory errors in high-traffic scenarios.
+
+# Enable IPv4, disable IPv6 (Not used in this lab, and dual stack cluster would increase debug surface)
+ipv4:
+  enabled: true
+ipv6: 
+  enabled: false
+enableIPv4BIGTCP: true # Cilium tunning -> Enable support for larger GSO and GRO , reducing number of times stack is traversed, which is required for high-bandwidth, high-latency networks. 
+enableIPv6BIGTCP: false # IPv6 unused in this lab, and dual stack cluster would increase debug surface.
+
+ipam:
+  operator:
+    clusterPoolIPv4PodCIDRList:
+      - "10.0.0.0/8"  # explicit pin; must remain a superset of ipv4NativeRoutingCIDR so the masquerade boundary and the allocatable range are provably in sync
+

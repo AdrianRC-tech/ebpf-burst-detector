@@ -2,13 +2,15 @@
 
 This repository implements **Layer 1** of a subsecond, two-sided CUSUM burst
 detector for Kubernetes microservices. Layer 1 is the measurement substrate: a
-TCX-attached BPF program that counts ingress bytes per pod via the host-side
-veth, plus the userspace loader that observes the resulting per-CPU counter.
+BPF program that counts ingress bytes per pod at the **pod-side peer netkit
+device**, plus the userspace loader that observes the resulting per-CPU counter.
+
+**Datapath:** Cilium netkit + BPF host-routing (no legacy mode), kernel ≥ 6.8.
 
 **Current iteration: 2.** Both binaries are in place:
 
-- `cmd/ingress-counter/` — TCX data-path program that counts ingress bytes per
-  pod via the host-side veth (iteration 1).
+- `cmd/ingress-counter/` — data-path program that counts ingress bytes per pod
+  at the netkit peer device (iteration 1; loader migration to `AttachNetkitPeer` pending).
 - `cmd/cusum-detector/` — timer-triggered two-sided CUSUM detector running
   entirely in kernel space; reads the shared per-CPU counter every window and
   emits onset/drain events to userspace via a ring buffer (iteration 2).
@@ -27,7 +29,7 @@ README covers how to build, run, and validate both binaries.
 
 | Tool | Version | Why |
 |---|---|---|
-| Linux kernel | **≥ 6.6** (developed on 6.17) | TCX attach API; `bpf_link` lifecycle |
+| Linux kernel | **≥ 6.8** (developed on 6.17) | netkit datapath (Cilium, kernel ≥ 6.8); `bpf_link` lifecycle |
 | Go | **≥ 1.24** (host has 1.26) | `tool` directive in `go.mod` |
 | clang | ≥ 12 (host has 18) | BPF C compilation |
 | bpftool | recent | BTF dump for `vmlinux.h` |
@@ -87,23 +89,27 @@ kind nodes have their own netns, and that's where the pod veths live.
    docker cp bin/ingress-counter burst-detection-lab-worker:/usr/local/bin/ingress-counter
    ```
 
-2. **Pick a pod and find its host-side veth.** Cilium names host-side veths
-   `lxcXXXX@ifN`, where `ifN` is the peer index inside the pod's netns.
+2. **Pick a pod and find its netkit peer device.** With the Cilium netkit
+   datapath, the pod's device (inside its netns) is type `netkit`; the primary
+   device (host netns) manages its peer's BPF programs from the host — no
+   `setns()` required.
 
    ```bash
-   kubectl get pod -o wide                                              # pick a pod, note its node
-   docker exec burst-detection-lab-worker ip link | grep lxc            # candidate veths in that node
-   kubectl exec <pod> -- ip link                                        # confirm by cross-referencing the @ifN index
+   kubectl get pod -o wide                                               # pick a pod, note its node
+   docker exec burst-detection-lab-worker ip -d link | grep -B1 netkit   # list netkit devices by type
    ```
 
   The mapping visualized:
 
-  POD NAMESPACE              HOST NAMESPACE
-  ─────────────────          ─────────────────────────
-  7: eth0@if13    ←peer──→  13: lxcXXXXXX@if7
-     ^    ^^^                    ^^        ^^^
-     │    host-side index         │        pod-side index
-     pod-side index               host-side index (what you grep for)
+  POD NAMESPACE                  HOST NAMESPACE
+  ───────────────────────────    ────────────────────────────────────
+  eth0 (netkit peer) ←peer──→   lxcXXXXXX (netkit primary / host)
+  └── BPF attaches here               └── manages peer BPF (no setns)
+
+  **Note (pending migration):** The current `ingress-counter` binary still
+  attaches via TCX-on-veth (`lxcXXXX`). Run it with `--iface lxcXXXX` (the
+  existing host-side veth name) until the `AttachNetkitPeer` loader migration
+  lands.
 
 3. **Run the binary inside the kind node:**
 
@@ -291,19 +297,20 @@ git diff           # review the header diff before committing
 - **"failed to set memlock rlimit: operation not permitted"** — the loader
   needs `CAP_BPF` (or run as root). Inside a kind node container the default
   user has it; on the host, `sudo` the binary.
-- **TCX coexistence with Cilium.** Cilium attaches its own programs to the
-  same veths via classic clsact filters; TCX runs alongside them, not over
-  them. To confirm both are present after attach:
+- **netkit multi-attach (`bpf_mprog`) coexistence with Cilium.** Cilium
+  manages BPF programs on netkit devices via `bpf_mprog`; `ingress_counter`
+  attaches alongside them at the peer device (kernel ≥ 6.8). To confirm both
+  are present after attach:
   ```bash
-  docker exec burst-detection-lab-worker bpftool net show dev lxcXXXX
+  docker exec burst-detection-lab-worker bpftool net show dev <netkit-peer>
   ```
-  You should see both Cilium's classic-TC programs and the `ingress_counter`
-  TCX program listed.
+  You should see both Cilium's programs and `ingress_counter` listed under the
+  netkit peer device.
 - **Cluster connectivity breaks after attach.** Shouldn't happen — the
   program returns `TC_ACT_OK` unconditionally and only writes to a counter.
   If it does: detach (Ctrl-C the loader), confirm Cilium's programs survive
-  via `bpftool net show`, and check that kernel version is ≥ 6.6 (TCX
-  coexistence is a 6.6 feature).
+  via `bpftool net show`, and check that kernel version is ≥ 6.8 (netkit
+  multi-attach requires kernel ≥ 6.8).
 - **VS Code IntelliSense can't find `bpf/bpf_helpers.h`.** Point the C/C++
   extension's `includePath` at `${workspaceFolder}/ebpf/headers` via
   `.vscode/c_cpp_properties.json`.

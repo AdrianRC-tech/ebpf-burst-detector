@@ -58,18 +58,18 @@ kind load docker-image "$IMAGE" --name "$KIND_CLUSTER"
 echo "=== Phase 4: Deploy HotelReservation ==="
 
 kind export kubeconfig --name "$KIND_CLUSTER"
-kubectl -n hotel-reservation apply -Rf "$HOTEL_RES_DIR/kubernetes/"
+kubectl apply -Rf "$HOTEL_RES_DIR/kubernetes/"
 
 # K8s manifests hardcode :latest; override each deployment to use our local tag.
 # Non-:latest tags default to imagePullPolicy=IfNotPresent, so kubelets use the
 # kind-loaded image without contacting Docker Hub.
 echo "Updating deployments to use local image $IMAGE..."
 for svc in frontend geo profile rate recommendation reservation search user; do
-  kubectl -n hotel-reservation set image deployment/"$svc" "hotel-reserv-$svc=$IMAGE" 2>/dev/null || true
+  kubectl set image deployment/"$svc" "hotel-reserv-$svc=$IMAGE" 2>/dev/null || true
 done
 
 echo "Waiting for all pods to be ready (timeout 5 min)..."
-kubectl -n hotel-reservation wait --for=condition=ready pod --all --timeout=400s
+kubectl wait --for=condition=ready pod --all --timeout=400s
 
 # ── Done ──────────────────────────────────────────────────────────────────
 
