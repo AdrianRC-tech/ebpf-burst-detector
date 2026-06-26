@@ -11,8 +11,10 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"runtime"
 	"strconv"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/cilium/ebpf"
@@ -20,6 +22,7 @@ import (
 	"github.com/cilium/ebpf/rlimit"
 	"github.com/jsimonetti/rtnetlink/v2"
 	"github.com/mdlayher/netlink"
+	"github.com/vishvananda/netns"
 	"golang.org/x/sys/unix"
 )
 
@@ -34,7 +37,7 @@ type attachment struct {
 type netkitDev struct {
 	Ifindex      uint32
 	Name         string
-	PeerIfindex  int    // peer (pod-side eth0) ifindex, relative to the pod netns; 0 if unknown
+	PeerIfindex  uint32 // peer (pod-side eth0) ifindex, relative to the pod netns; 0 if unknown
 	PodNetnsPath string // path to pod's network namespace, e.g. /proc/<pid>/ns/net; empty if unknown
 }
 
@@ -224,7 +227,7 @@ func enrichNetkitDev(
 	if info.PeerIfindex == 0 {
 		return dev, fmt.Errorf("ifindex %d: IFLA_LINK (peer ifindex) is zero or absent", dev.Ifindex)
 	}
-	dev.PeerIfindex = int(info.PeerIfindex)
+	dev.PeerIfindex = info.PeerIfindex
 
 	if info.NetnsID < 0 {
 		// Peer is in the same netns as the primary (unusual for a pod-attached
@@ -461,31 +464,75 @@ func decideAttach(alreadyAttached bool, ns string, found bool, refreshErr error,
 	return true, fmt.Sprintf("attached (namespace %q)", ns)
 }
 
-// attachOne attaches the data-path program to the netkit primary of the given
-// host-side ifindex if the device's namespace is in allowedNS.
+// attachOne attaches the data-path program via tcx-ingress on the pod-side peer
+// device (inside the pod netns) for the given netkitDev, if the device's
+// Kubernetes namespace is in allowedNS.
 // Skip-and-continue semantics: returns a reason string with nil error when the
 // device is skipped; returns ("", err) only for genuine attach failures.
-func (a *attachment) attachOne(ifindex uint32, resolver nsResolver, allowedNS map[string]struct{}) (string, error) {
-	_, already := a.links[ifindex]
+func (a *attachment) attachOne(dev netkitDev, resolver nsResolver, allowedNS map[string]struct{}) (string, error) {
+	_, already := a.links[dev.Ifindex]
 	var ns string
 	var found bool
 	if !already {
-		ns, found = resolver.namespaceFor(ifindex) // retries internally on cache miss
+		ns, found = resolver.namespaceFor(dev.Ifindex) // retries internally on cache miss
 	}
 
 	attach, reason := decideAttach(already, ns, found, resolver.refreshErr(), allowedNS)
 	if !attach {
 		return reason, nil
 	}
-	l, err := link.AttachNetkit(link.NetkitOptions{
-		Interface: int(ifindex),
-		Program:   a.objs.IngressCounter,
-		Attach:    ebpf.AttachNetkitPrimary,
-	})
+
+	// Cross into the pod netns to attach tcx-ingress on the peer device.
+	// LockOSThread must be called before any netns operation; UnlockOSThread is
+	// called only after the host netns is fully restored.
+	runtime.LockOSThread()
+
+	hostNs, err := netns.Get()
 	if err != nil {
-		return "", fmt.Errorf("attaching netkit primary on ifindex %d: %w", ifindex, err)
+		runtime.UnlockOSThread()
+		return "", fmt.Errorf("get host netns: %w", err)
 	}
-	a.links[ifindex] = l
+	defer hostNs.Close()
+
+	podNs, err := netns.GetFromPath(dev.PodNetnsPath)
+	if err != nil {
+		runtime.UnlockOSThread()
+		if errors.Is(err, syscall.ENOENT) {
+			slog.Debug("pod netns gone before tcx attach, skipping", "dev", dev.Name)
+			return "pod netns gone, skipped", nil
+		}
+		return "", fmt.Errorf("open pod netns %s: %w", dev.PodNetnsPath, err)
+	}
+	defer podNs.Close()
+
+	if err := netns.Set(podNs); err != nil {
+		runtime.UnlockOSThread()
+		return "", fmt.Errorf("enter pod netns: %w", err)
+	}
+
+	l, attachErr := link.AttachTCX(link.TCXOptions{
+		Interface: int(dev.PeerIfindex),
+		Program:   a.objs.IngressCounter,
+		Attach:    ebpf.AttachTCXIngress,
+	})
+
+	if restoreErr := netns.Set(hostNs); restoreErr != nil {
+		// netns restore failed — thread is in unknown state, terminate
+		slog.Error("failed to restore host netns after tcx attach, terminating", "err", restoreErr)
+		os.Exit(1)
+	}
+	runtime.UnlockOSThread()
+
+	if attachErr != nil {
+		// Treat ENOENT/ENODEV as benign race (pod torn down between discovery and attach).
+		if errors.Is(attachErr, syscall.ENOENT) || errors.Is(attachErr, syscall.ENODEV) {
+			slog.Debug("pod gone before tcx attach, skipping", "dev", dev.Name)
+			return "pod gone before attach, skipped", nil
+		}
+		return "", fmt.Errorf("attach tcx-ingress on peer %d (pod %s): %w", dev.PeerIfindex, dev.Name, attachErr)
+	}
+
+	a.links[dev.Ifindex] = l // keyed by host-side primary ifindex, unchanged
 	return reason, nil
 }
 

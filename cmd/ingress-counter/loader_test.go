@@ -159,7 +159,7 @@ func TestEnrichNetkitDev(t *testing.T) {
 		findNetns       func(int32) (string, error)
 		wantErr         bool
 		wantErrContains string
-		wantPeerIfindex int
+		wantPeerIfindex uint32
 		wantNetnsPath   string
 	}{
 		{
