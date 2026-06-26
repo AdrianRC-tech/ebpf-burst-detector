@@ -40,7 +40,7 @@ func TestIngressCounterIncrementsBySkbLen(t *testing.T) {
 		t.Fatalf("program returned %d, want TC_ACT_OK (0)", ret)
 	}
 
-	total, err := readTotal(objs.NodeIngressBytes)
+	total, err := readTotal(objs.NodeIngrBytes)
 	if err != nil {
 		t.Fatalf("readTotal: %v", err)
 	}
@@ -52,7 +52,10 @@ func TestIngressCounterIncrementsBySkbLen(t *testing.T) {
 // makeTestPacket builds a syntactically-plausible Ethernet+IPv4+TCP frame of
 // the requested total length. Content beyond the headers is zero-padded;
 // the data-path program only inspects skb->len, so payload contents don't
-// matter.
+// matter. NOTE: Production netkit primary-device attachment uses L3 framing
+// (no Ethernet header); BPF_PROG_TEST_RUN feeds a full L2 frame for syntactic
+// validity. skb->len includes all bytes, so the test still validates counter
+// increment correctly regardless of the framing difference.
 func makeTestPacket(total int) []byte {
 	const minLen = 54
 	if total < minLen {
