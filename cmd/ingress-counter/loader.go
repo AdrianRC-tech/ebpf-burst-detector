@@ -2,13 +2,16 @@ package main
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"sync"
 	"time"
 
@@ -16,7 +19,8 @@ import (
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/rlimit"
 	"github.com/jsimonetti/rtnetlink/v2"
-	_ "github.com/vishvananda/netns"
+	"github.com/mdlayher/netlink"
+	"golang.org/x/sys/unix"
 )
 
 const bpfPinDir = "/sys/fs/bpf/burst-detector"
@@ -28,8 +32,212 @@ type attachment struct {
 }
 
 type netkitDev struct {
-	Ifindex uint32
-	Name    string
+	Ifindex      uint32
+	Name         string
+	PeerIfindex  int    // peer (pod-side eth0) ifindex, relative to the pod netns; 0 if unknown
+	PodNetnsPath string // path to pod's network namespace, e.g. /proc/<pid>/ns/net; empty if unknown
+}
+
+// peerNetlinkInfo holds the raw peer information extracted from a netlink
+// RTM_GETLINK response for a netkit primary device.
+type peerNetlinkInfo struct {
+	// PeerIfindex is the peer (pod-side) ifindex from IFLA_LINK.
+	// For a netkit primary whose peer lives in a different netns this value is
+	// the ifindex as seen from inside the pod netns.
+	PeerIfindex uint32
+	// NetnsID is the IFLA_LINK_NETNSID value from the kernel response.
+	// -1 means "peer is in the same netns as the primary" (no IFLA_LINK_NETNSID sent).
+	NetnsID int32
+}
+
+// fetchPeerNetlinkInfo sends a raw RTM_GETLINK request for ifindex and extracts
+// IFLA_LINK (peer ifindex) and IFLA_LINK_NETNSID from the response. It uses the
+// mdlayher/netlink layer directly so that the IFLA_LINK_NETNSID attribute —
+// which the jsimonetti/rtnetlink high-level decoder does not surface — can be
+// read without patching the library.
+//
+// IFLA_LINK_NETNSID is only present when the peer lives in a different network
+// namespace; if the attribute is absent, NetnsID is set to -1.
+func fetchPeerNetlinkInfo(ifindex uint32) (peerNetlinkInfo, error) {
+	conn, err := netlink.Dial(unix.NETLINK_ROUTE, nil)
+	if err != nil {
+		return peerNetlinkInfo{}, fmt.Errorf("dialing netlink for peer info: %w", err)
+	}
+	defer conn.Close()
+
+	// Build RTM_GETLINK request: IfInfomsg with the desired ifindex.
+	const sizeofIfInfomsg = 16 // Family(1)+pad(1)+Type(2)+Index(4)+Flags(4)+Change(4)
+	hdr := make([]byte, sizeofIfInfomsg)
+	binary.NativeEndian.PutUint32(hdr[4:8], ifindex)
+
+	req := netlink.Message{
+		Header: netlink.Header{
+			Type:  unix.RTM_GETLINK,
+			Flags: netlink.Request | netlink.DumpFiltered,
+		},
+		Data: hdr,
+	}
+
+	msgs, err := conn.Execute(req)
+	if err != nil {
+		return peerNetlinkInfo{}, fmt.Errorf("RTM_GETLINK for ifindex %d: %w", ifindex, err)
+	}
+
+	info := peerNetlinkInfo{NetnsID: -1}
+	for _, m := range msgs {
+		if len(m.Data) < sizeofIfInfomsg {
+			continue
+		}
+		ad, err := netlink.NewAttributeDecoder(m.Data[sizeofIfInfomsg:])
+		if err != nil {
+			return peerNetlinkInfo{}, fmt.Errorf("decoding netlink attrs for ifindex %d: %w", ifindex, err)
+		}
+		ad.ByteOrder = binary.NativeEndian
+		for ad.Next() {
+			switch ad.Type() {
+			case unix.IFLA_LINK: // 0x5 — peer ifindex
+				info.PeerIfindex = ad.Uint32()
+			case unix.IFLA_LINK_NETNSID: // 0x25 — netns id where the peer lives
+				info.NetnsID = ad.Int32()
+			}
+		}
+		if err := ad.Err(); err != nil {
+			return peerNetlinkInfo{}, fmt.Errorf("iterating netlink attrs for ifindex %d: %w", ifindex, err)
+		}
+	}
+	return info, nil
+}
+
+// resolvePodNetnsPath maps a kernel netns ID (from IFLA_LINK_NETNSID) to a
+// /proc/<pid>/ns/net path.
+//
+// The approach: walk /proc/[0-9]*/ns/net; for each candidate open the file and
+// send RTM_GETNSID (with NETNSA_FD) to ask the kernel what nsid it has in the
+// current (host) network namespace. Return the first path whose nsid matches
+// netnsID. RTM_GETNSID is available since kernel 3.19.
+func resolvePodNetnsPath(netnsID int32) (string, error) {
+	// Open a NETLINK_ROUTE socket once and reuse it for all RTM_GETNSID queries.
+	nlConn, err := netlink.Dial(unix.NETLINK_ROUTE, nil)
+	if err != nil {
+		return "", fmt.Errorf("dialing netlink for nsid resolution: %w", err)
+	}
+	defer nlConn.Close()
+
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return "", fmt.Errorf("reading /proc: %w", err)
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		if _, err := strconv.Atoi(e.Name()); err != nil {
+			continue
+		}
+		nsPath := fmt.Sprintf("/proc/%s/ns/net", e.Name())
+		gotID, err := queryNetnsID(nlConn, nsPath)
+		if err != nil {
+			// Not found or permission denied — skip silently.
+			continue
+		}
+		if gotID == netnsID {
+			return nsPath, nil
+		}
+	}
+	return "", fmt.Errorf("no process found for netns id %d", netnsID)
+}
+
+// queryNetnsID opens the netns file at path and asks the kernel (via
+// RTM_GETNSID / NETNSA_FD) for the nsid of that namespace as seen from the
+// current (host) network namespace. Returns the nsid on success.
+func queryNetnsID(nlConn *netlink.Conn, path string) (int32, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, fmt.Errorf("opening %s: %w", path, err)
+	}
+	defer f.Close()
+
+	// Encode the RTM_GETNSID request body: a single nested attribute
+	// NETNSA_FD containing the fd of the netns file.
+	ae := netlink.NewAttributeEncoder()
+	ae.ByteOrder = binary.NativeEndian
+	ae.Uint32(unix.NETNSA_FD, uint32(f.Fd()))
+	attrBytes, err := ae.Encode()
+	if err != nil {
+		return 0, fmt.Errorf("encoding NETNSA_FD: %w", err)
+	}
+
+	// RTM_GETNSID header: rtgenmsg (af_unspec = 1 byte + 3 bytes pad).
+	body := append([]byte{unix.AF_UNSPEC, 0, 0, 0}, attrBytes...)
+
+	req := netlink.Message{
+		Header: netlink.Header{
+			Type:  unix.RTM_GETNSID,
+			Flags: netlink.Request | netlink.Acknowledge,
+		},
+		Data: body,
+	}
+
+	msgs, err := nlConn.Execute(req)
+	if err != nil {
+		return 0, fmt.Errorf("RTM_GETNSID for %s: %w", path, err)
+	}
+
+	// Parse RTM_NEWNSID response: rtgenmsg (4 bytes) + netlink attributes.
+	const sizeofRtgenmsg = 4
+	for _, m := range msgs {
+		if len(m.Data) < sizeofRtgenmsg {
+			continue
+		}
+		ad, err := netlink.NewAttributeDecoder(m.Data[sizeofRtgenmsg:])
+		if err != nil {
+			return 0, fmt.Errorf("decoding RTM_NEWNSID attrs: %w", err)
+		}
+		ad.ByteOrder = binary.NativeEndian
+		for ad.Next() {
+			if ad.Type() == unix.NETNSA_NSID {
+				return ad.Int32(), nil
+			}
+		}
+		if err := ad.Err(); err != nil {
+			return 0, fmt.Errorf("iterating RTM_NEWNSID attrs: %w", err)
+		}
+	}
+	return 0, fmt.Errorf("NETNSA_NSID not found in RTM_GETNSID response for %s", path)
+}
+
+// enrichNetkitDev populates PeerIfindex and PodNetnsPath for a netkitDev.
+// fetchPeer and findNetns are injected so the function can be unit-tested
+// without live netlink or /proc access.
+//
+// If peer info cannot be resolved, enrichNetkitDev returns the original dev
+// unchanged and a non-nil error; the caller decides whether to skip the device.
+func enrichNetkitDev(
+	dev netkitDev,
+	fetchPeer func(ifindex uint32) (peerNetlinkInfo, error),
+	findNetns func(netnsID int32) (string, error),
+) (netkitDev, error) {
+	info, err := fetchPeer(dev.Ifindex)
+	if err != nil {
+		return dev, fmt.Errorf("fetching peer netlink info for ifindex %d: %w", dev.Ifindex, err)
+	}
+	if info.PeerIfindex == 0 {
+		return dev, fmt.Errorf("ifindex %d: IFLA_LINK (peer ifindex) is zero or absent", dev.Ifindex)
+	}
+	dev.PeerIfindex = int(info.PeerIfindex)
+
+	if info.NetnsID < 0 {
+		// Peer is in the same netns as the primary (unusual for a pod-attached
+		// netkit, but handle gracefully). We cannot derive a pod netns path.
+		return dev, fmt.Errorf("ifindex %d: peer is in the same netns (IFLA_LINK_NETNSID absent)", dev.Ifindex)
+	}
+
+	nsPath, err := findNetns(info.NetnsID)
+	if err != nil {
+		return dev, fmt.Errorf("resolving pod netns for ifindex %d (netnsid %d): %w", dev.Ifindex, info.NetnsID, err)
+	}
+	dev.PodNetnsPath = nsPath
+	return dev, nil
 }
 
 // nsResolver is the interface used by attachOne to look up the Kubernetes
@@ -166,7 +374,12 @@ func parseEndpoints(body []byte) (map[uint32]string, error) {
 }
 
 // discoverNetkitDevices lists all netkit devices visible in the current network
-// namespace via rtnetlink. Must be called from the host netns.
+// namespace via rtnetlink, and enriches each entry with the peer ifindex and
+// pod netns path. Must be called from the host netns.
+//
+// Devices whose peer info cannot be resolved are logged at warn level and
+// omitted from the returned slice so that a single un-resolvable device does
+// not block attachment to the remaining devices.
 func discoverNetkitDevices() ([]netkitDev, error) {
 	conn, err := rtnetlink.Dial(nil)
 	if err != nil {
@@ -185,7 +398,14 @@ func discoverNetkitDevices() ([]netkitDev, error) {
 		if m.Attributes != nil {
 			name = m.Attributes.Name
 		}
-		devs = append(devs, netkitDev{Ifindex: uint32(m.Index), Name: name})
+		base := netkitDev{Ifindex: uint32(m.Index), Name: name}
+		enriched, err := enrichNetkitDev(base, fetchPeerNetlinkInfo, resolvePodNetnsPath)
+		if err != nil {
+			slog.Warn("skipping netkit device: peer/netns resolution failed",
+				"ifindex", base.Ifindex, "name", base.Name, "err", err)
+			continue
+		}
+		devs = append(devs, enriched)
 	}
 	return devs, nil
 }
