@@ -10,12 +10,14 @@ device**, plus the userspace loader that observes the resulting per-CPU counter.
 **Current iteration: 2.** Both binaries are in place:
 
 - `cmd/ingress-counter/` — data-path program that counts ingress bytes per pod
-  at the netkit peer device (iteration 1; loader migration to `AttachNetkitPeer` pending).
+  at the netkit peer device via `AttachNetkitPeer`; the loader is an
+  event-driven daemon (`RTNLGRP_LINK` netlink) that auto-discovers netkit
+  devices and filters by Kubernetes namespace (iteration 1).
 - `cmd/cusum-detector/` — timer-triggered two-sided CUSUM detector running
   entirely in kernel space; reads the shared per-CPU counter every window and
   emits onset/drain events to userspace via a ring buffer (iteration 2).
 
-The two binaries share `node_ingress_bytes` automatically through the BPF
+The two binaries share `node_ingr_bytes` automatically through the BPF
 filesystem (`LIBBPF_PIN_BY_NAME` declaration + `PinPath: /sys/fs/bpf/burst-detector`
 on both loaders). Start them in either order — whichever loads first creates
 the pinned map; the other reuses it.
@@ -76,12 +78,13 @@ If `ebpf/headers/vmlinux.h` is missing, regenerate it first (see below).
 
 ---
 
-## Run on the kind cluster
+## Run the ingress_counter on the pods of a cluster node
 
 The cluster is created and Cilium is installed by `cluster-setup.sh`; the
 HotelReservation workload is deployed by `deploy-hotelreservation.sh`. The
 binary runs **inside one of the kind node containers**, not on the host —
-kind nodes have their own netns, and that's where the pod veths live.
+kind nodes have their own netns, and that's where the pods and their netkit
+peer devices live.
 
 1. **Copy the binary into the worker node:**
 
@@ -89,13 +92,13 @@ kind nodes have their own netns, and that's where the pod veths live.
    docker cp bin/ingress-counter burst-detection-lab-worker:/usr/local/bin/ingress-counter
    ```
 
-2. **Pick a pod and find its netkit peer device.** With the Cilium netkit
-   datapath, the pod's device (inside its netns) is type `netkit`; the primary
-   device (host netns) manages its peer's BPF programs from the host — no
-   `setns()` required.
+2. **Pick a node to which we want to attach the programs.** With the Cilium netkit
+   datapath, the pod's device (inside its netns) is type `netkit`. The ingress
+   counter attaches a tcx-ingress BPF program to each pod's netkit peer device,
+   requiring a brief `setns()` to enter the pod netns.
 
-   ```bash
-   kubectl get pod -o wide                                               # pick a pod, note its node
+   ```bash                                       
+   kubectl get pods -o wide   # pick a pod we want to specially monitor, note its node
    docker exec burst-detection-lab-worker ip -d link | grep -B1 netkit   # list netkit devices by type
    ```
 
@@ -103,63 +106,37 @@ kind nodes have their own netns, and that's where the pod veths live.
 
   POD NAMESPACE                  HOST NAMESPACE
   ───────────────────────────    ────────────────────────────────────
-  eth0 (netkit peer) ←peer──→   lxcXXXXXX (netkit primary / host)
-  └── BPF attaches here               └── manages peer BPF (no setns)
-
-  **Note (pending migration):** The current `ingress-counter` binary still
-  attaches via TCX-on-veth (`lxcXXXX`). Run it with `--iface lxcXXXX` (the
-  existing host-side veth name) until the `AttachNetkitPeer` loader migration
-  lands.
+  eth0 (netkit peer)    ←peer──→   lxcXXXXXX (netkit primary / host)
+  └── BPF attaches here             (peer netns crossing at attach time)
+      (tcx-ingress)
 
 3. **Run the binary inside the kind node:**
 
    ```bash
    docker exec -it burst-detection-lab-worker \
-       /usr/local/bin/ingress-counter --iface lxcXXXX --interval 1s
+       /usr/local/bin/ingress-counter -namespaces default
    ```
 
    Flags:
-   - `--iface` (required): host-side veth name as seen inside the kind node.
-   - `--interval` (default `1s`): reporting cadence.
-   - `--oracle` (default `true`): also read
-     `/sys/class/net/<iface>/statistics/tx_bytes` each tick and report drift
-     against the BPF counter.
+   - `-namespaces` (default `default`): comma-separated allow-list of
+     Kubernetes namespaces to attach to. Pods placed in namespaces not provided are skipped automatically.
+   - `-cilium-socket` (default `/var/run/cilium/cilium.sock`): path to the
+     Cilium agent unix socket used to resolve pod namespaces.
 
-   Output is structured JSON to stderr (one line per tick). Ctrl-C
-   detaches the TCX link cleanly and exits.
-
----
-
-## End-to-end with the HotelReservation workload
-
-While `ingress-counter` runs against a pod's veth, drive traffic from the host
-side and watch the byte counters move.
-
-```bash
-# Terminal 1 — port-forward the frontend service
-kubectl port-forward svc/frontend 5000:5000
-
-# Terminal 2 — generate load (curl loop, or wrk2 from DeathStarBench)
-curl http://localhost:5000/
-# or for sustained load:
-# wrk2/wrk -D exp -t 2 -c 2 -d 30 -L -R 100 \
-#     -s DeathStarBench/hotelReservation/wrk2/scripts/hotel-reservation/mixed-workload_type_1.lua \
-#     http://localhost:5000
-```
-
-In the loader's output, `delta_bytes` should track each request and
-`oracle_drift` should stay within roughly one MTU per tick.
-
-`environment-interaction.md` lists port-forward commands for HotelReservation
-UI, Hubble UI, and Jaeger if you want to observe traffic from the cluster's
-own observability stack alongside the loader's readings.
+   The daemon auto-discovers netkit peer devices via `RTNLGRP_LINK` netlink
+   events and emits a structured JSON log line per attach/detach event, then
+   stays silent until Ctrl-C. Ctrl-C detaches all netkit links cleanly and
+   exits. Byte-per-window analysis is handled by `cusum-detector
+   --sample-windows` — see [Run the CUSUM burst detector](#run-the-cusum-burst-detector-iteration-2).
 
 ---
 
-## Run the CUSUM burst detector (iteration 2)
+---
 
-The detector loads alongside `ingress-counter` and shares `node_ingress_bytes`
-via the pinned map at `/sys/fs/bpf/burst-detector/node_ingress_bytes`. Copy
+## Run the CUSUM burst detector
+
+The detector loads alongside `ingress-counter` and shares `node_ingr_bytes`
+via the pinned map at `/sys/fs/bpf/burst-detector/node_ingr_bytes`. Copy
 the binary into the kind node and run it inside the same netns as
 `ingress-counter`:
 
@@ -172,6 +149,11 @@ docker exec -it burst-detection-lab-worker /usr/local/bin/cusum-detector \
     --h-onset  2000000 \
     --h-drain  2000000 \
     --window   10ms
+
+# Terminal 2 — IF we want to capture per-window byte samples to finte-tune cusum values first
+docker exec -it burst-detection-lab-worker \
+    /usr/local/bin/cusum-detector -window 100ms -sample-windows \
+    -sample-csv /tmp/windows.csv
 ```
 
 Flags (all CUSUM parameters are baked into `.rodata` at load time — change
@@ -184,6 +166,15 @@ them by restarting the binary, not by editing the running program):
 | `--h-onset` | bytes | threshold on `upper_sum` that triggers onset |
 | `--h-drain` | bytes | threshold on `lower_sum` that triggers drain |
 | `--window` | duration | CUSUM window (e.g. `10ms`, `5ms`) |
+| `--sample-windows` | bool | emit per-window byte samples to CSV for parameter tuning (default off) |
+| `--sample-csv` | path | destination for window sample CSV (default: stderr) |
+
+`--sample-windows` is the **single canonical byte-per-window analysis and
+tuning source for Layer 1** — it captures the exact signal the kernel CUSUM
+consumes, window-aligned and at full resolution. For parameter tuning, run
+with `-window 100ms -sample-windows -sample-csv /tmp/windows.csv`, drive load
+with `wrk2`, then derive `mu_0`/`k`/`h_*` from the captured per-window byte
+deltas.
 
 Output is structured JSON to stderr, one line per arming event plus one line
 per onset/drain transition. The detector also exposes a single-byte `burst_flag`
@@ -191,7 +182,7 @@ BPF map (0 = quiescent, 1 = burst) as Layer 1's architectural output for
 downstream consumers.
 
 **Start order is irrelevant.** Whichever process loads first creates the pinned
-`node_ingress_bytes` map at `/sys/fs/bpf/burst-detector/`; the other reuses it.
+`node_ingr_bytes` map at `/sys/fs/bpf/burst-detector/`; the other reuses it.
 
 **To reset all shared state** (e.g. for a fresh CUSUM tuning run with no
 historical counter accumulation):
@@ -203,6 +194,36 @@ sudo rm -rf /sys/fs/bpf/burst-detector
 This unpins the shared map. Both binaries must be stopped first.
 
 ---
+
+## Execute end-to-end load with the HotelReservation workload
+
+While `ingress-counter` runs as a silent attach daemon, drive traffic and
+capture per-window byte samples via `cusum-detector --sample-windows`.
+
+```bash
+# Terminal 1 — port-forward the frontend service
+kubectl port-forward svc/frontend 5000:5000
+
+# Terminal 2 — capture per-window byte samples
+docker exec -it burst-detection-lab-worker \
+    /usr/local/bin/cusum-detector -window 100ms -sample-windows \
+    -sample-csv /tmp/windows.csv
+
+# Terminal 3 — generate load (curl loop, or wrk2 from DeathStarBench)
+curl http://localhost:5000/
+# or for sustained load:
+# wrk2/wrk -D exp -t 2 -c 2 -d 30 -L -R 100 \
+#     -s DeathStarBench/hotelReservation/wrk2/scripts/hotel-reservation/mixed-workload_type_1.lua \
+#     http://localhost:5000
+```
+
+Watch `delta_bytes` rows accumulate in `/tmp/windows.csv` — that CSV is the
+canonical byte-per-window signal for deriving `mu_0`/`k`/`h_*`.
+
+`environment-interaction.md` lists port-forward commands for HotelReservation
+UI, Hubble UI, and Jaeger if you want to observe traffic from the cluster's
+own observability stack alongside the loader's readings.
+
 
 ## Monitoring (Prometheus + Grafana)
 
@@ -314,8 +335,3 @@ git diff           # review the header diff before committing
 - **VS Code IntelliSense can't find `bpf/bpf_helpers.h`.** Point the C/C++
   extension's `includePath` at `${workspaceFolder}/ebpf/headers` via
   `.vscode/c_cpp_properties.json`.
-- **`oracle_drift` is large and growing.** The kernel updates
-  `/sys/class/net/.../statistics/tx_bytes` asynchronously relative to the
-  BPF read; a small steady drift is expected. Sustained large drift suggests
-  the wrong veth (you're counting one pod, the oracle is reading another)
-  or a stale attachment.

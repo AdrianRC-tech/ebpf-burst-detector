@@ -1,10 +1,10 @@
 // Command ingress-counter is the userspace driver for Layer 1's data-path
-// byte counter. It attaches a netkit-primary BPF program to every pod's netkit
-// primary device in the specified Kubernetes namespaces. Pod lifecycle is tracked
-// via a RTNLGRP_LINK netlink subscription so the daemon reacts to creations
-// and deletions without polling. The daemon is silent after attach/detach log
-// lines — byte-per-window analysis is delegated to cusum-detector
-// --sample-windows.
+// byte counter. It attaches a tcx-ingress BPF program to every pod's netkit
+// peer device (via a brief setns crossing) in the specified Kubernetes namespaces.
+// Pod lifecycle is tracked via a RTNLGRP_LINK netlink subscription so the daemon
+// reacts to creations and deletions without polling. The daemon is silent after
+// attach/detach log lines — byte-per-window analysis is delegated to
+// cusum-detector --sample-windows.
 package main
 
 import (
@@ -172,17 +172,10 @@ func run(logger *slog.Logger) error {
 		events <- linkEvent{dev: dev, add: true}
 	}
 
-	// TODO(human): Block until the process receives a shutdown signal, then
-	// run the ordered shutdown sequence so all netkit links are detached
-	// cleanly before the process exits. Return nil on a clean shutdown.
-	//
-	// Ordered shutdown:  stop() → nlConn.Close() → wg.Wait() → att.Close()
-	//
-	// Hint: stop() releases the OS signal subscription (so a second Ctrl-C
-	// can force-exit the process); nlConn.Close() unblocks the receiver
-	// goroutine that is parked on nlConn.Receive(); wg.Wait() ensures the
-	// worker goroutine fully drains the event channel before att.Close() tears
-	// down the BPF objects and fd table.
+	// Ordered shutdown: stop() → nlConn.Close() → wg.Wait() → att.Close().
+	// stop() releases the OS signal subscription; nlConn.Close() unblocks the
+	// receiver goroutine; wg.Wait() drains the event channel before att.Close()
+	// tears down BPF objects and the fd table.
 	<-ctx.Done()
 	stop()
 	nlConn.Close()
