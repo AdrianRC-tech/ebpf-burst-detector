@@ -116,6 +116,7 @@ StyleCopReport.xml
 *.tli
 *.tlh
 *.tmp
+/tmp/
 *.tmp_proj
 *_wpftmp.csproj
 *.log
@@ -431,6 +432,9 @@ FodyWeavers.xsd
 # Claude Code
 CLAUDE.md
 .claude/
+
+# Git worktrees
+.worktrees/
 
 # Specs
 docs/superpowers/specs/

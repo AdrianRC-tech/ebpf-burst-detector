@@ -47,7 +47,8 @@ echo "=== Phase 2: Load (rate=${RATE} rps  duration=${DURATION}s  threads=${THRE
 echo ""
 echo "  Running mixed-workload (60% search, 39% recommend, 1% login/reserve)"
 echo "  against $TARGET — this is your mu_0 measurement window."
-echo "  Watch 'delta_bytes' in the ingress-counter output stabilise."
+echo "  In a separate terminal run: cusum-detector -window 100ms -sample-windows -sample-csv /tmp/windows.csv
+  Watch per-window delta_bytes rows accumulate in /tmp/windows.csv to derive mu_0/k/h_* values."
 echo ""
 
 "$WRK2_DIR/wrk" \

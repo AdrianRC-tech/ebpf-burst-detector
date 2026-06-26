@@ -5,8 +5,8 @@
  * cusum_detector.bpf.c (timer-driven detector) include this header so the
  * map schema cannot drift between them.
  *
- * node_ingress_bytes uses LIBBPF_PIN_BY_NAME so the kernel-side map object is
- * pinned to the BPF filesystem at <PinPath>/node_ingress_bytes. cilium/ebpf
+ * node_ingr_bytes uses LIBBPF_PIN_BY_NAME so the kernel-side map object is
+ * pinned to the BPF filesystem at <PinPath>/node_ingr_bytes. cilium/ebpf
  * sees the pinning attribute in the ELF and at load time either creates the
  * map and pins it (first loader) or opens the existing pin (subsequent
  * loaders), giving every BPF object the same underlying kernel map fd.
@@ -22,4 +22,4 @@ struct {
 	__type(value, __u64);
 	__uint(max_entries, 1);
 	__uint(pinning, LIBBPF_PIN_BY_NAME);
-} node_ingress_bytes SEC(".maps");
+} node_ingr_bytes SEC(".maps");

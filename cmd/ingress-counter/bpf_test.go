@@ -40,7 +40,7 @@ func TestIngressCounterIncrementsBySkbLen(t *testing.T) {
 		t.Fatalf("program returned %d, want TC_ACT_OK (0)", ret)
 	}
 
-	total, err := readTotal(objs.NodeIngressBytes)
+	total, err := readTotal(objs.NodeIngrBytes)
 	if err != nil {
 		t.Fatalf("readTotal: %v", err)
 	}
