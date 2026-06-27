@@ -29,9 +29,8 @@ import (
 const bpfPinDir = "/sys/fs/bpf/burst-detector"
 
 type attachment struct {
-	objs    bpfObjects
-	links   map[uint32]link.Link // ifindex → netkit primary link
-	counter *ebpf.Map            // read-only alias into objs.NodeIngrBytes; never Close this field directly
+	objs  bpfObjects
+	links map[uint32]link.Link // ifindex → netkit primary link
 }
 
 type netkitDev struct {
@@ -436,9 +435,8 @@ func initAttachment() (*attachment, error) {
 		}
 	}()
 	att := &attachment{
-		objs:    objs,
-		links:   make(map[uint32]link.Link),
-		counter: objs.NodeIngrBytes,
+		objs:  objs,
+		links: make(map[uint32]link.Link),
 	}
 	ok = true
 	return att, nil
