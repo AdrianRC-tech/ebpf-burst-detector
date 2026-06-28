@@ -77,22 +77,24 @@ type bpfProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type bpfMapSpecs struct {
-	BurstEvents      *ebpf.MapSpec `ebpf:"burst_events"`
-	BurstFlag        *ebpf.MapSpec `ebpf:"burst_flag"`
-	CusumState       *ebpf.MapSpec `ebpf:"cusum_state"`
-	NodeIngressBytes *ebpf.MapSpec `ebpf:"node_ingress_bytes"`
-	TimerMap         *ebpf.MapSpec `ebpf:"timer_map"`
+	BurstEvents   *ebpf.MapSpec `ebpf:"burst_events"`
+	BurstFlag     *ebpf.MapSpec `ebpf:"burst_flag"`
+	CusumState    *ebpf.MapSpec `ebpf:"cusum_state"`
+	NodeIngrBytes *ebpf.MapSpec `ebpf:"node_ingr_bytes"`
+	TimerMap      *ebpf.MapSpec `ebpf:"timer_map"`
+	WindowSamples *ebpf.MapSpec `ebpf:"window_samples"`
 }
 
 // bpfVariableSpecs contains global variables before they are loaded into the kernel.
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type bpfVariableSpecs struct {
-	H_drain  *ebpf.VariableSpec `ebpf:"h_drain"`
-	H_onset  *ebpf.VariableSpec `ebpf:"h_onset"`
-	K        *ebpf.VariableSpec `ebpf:"k"`
-	Mu0      *ebpf.VariableSpec `ebpf:"mu_0"`
-	WindowNs *ebpf.VariableSpec `ebpf:"window_ns"`
+	H_drain       *ebpf.VariableSpec `ebpf:"h_drain"`
+	H_onset       *ebpf.VariableSpec `ebpf:"h_onset"`
+	K             *ebpf.VariableSpec `ebpf:"k"`
+	Mu0           *ebpf.VariableSpec `ebpf:"mu_0"`
+	SampleWindows *ebpf.VariableSpec `ebpf:"sample_windows"`
+	WindowNs      *ebpf.VariableSpec `ebpf:"window_ns"`
 }
 
 // bpfObjects contains all objects after they have been loaded into the kernel.
@@ -115,11 +117,12 @@ func (o *bpfObjects) Close() error {
 //
 // It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type bpfMaps struct {
-	BurstEvents      *ebpf.Map `ebpf:"burst_events"`
-	BurstFlag        *ebpf.Map `ebpf:"burst_flag"`
-	CusumState       *ebpf.Map `ebpf:"cusum_state"`
-	NodeIngressBytes *ebpf.Map `ebpf:"node_ingress_bytes"`
-	TimerMap         *ebpf.Map `ebpf:"timer_map"`
+	BurstEvents   *ebpf.Map `ebpf:"burst_events"`
+	BurstFlag     *ebpf.Map `ebpf:"burst_flag"`
+	CusumState    *ebpf.Map `ebpf:"cusum_state"`
+	NodeIngrBytes *ebpf.Map `ebpf:"node_ingr_bytes"`
+	TimerMap      *ebpf.Map `ebpf:"timer_map"`
+	WindowSamples *ebpf.Map `ebpf:"window_samples"`
 }
 
 func (m *bpfMaps) Close() error {
@@ -127,8 +130,9 @@ func (m *bpfMaps) Close() error {
 		m.BurstEvents,
 		m.BurstFlag,
 		m.CusumState,
-		m.NodeIngressBytes,
+		m.NodeIngrBytes,
 		m.TimerMap,
+		m.WindowSamples,
 	)
 }
 
@@ -136,11 +140,12 @@ func (m *bpfMaps) Close() error {
 //
 // It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type bpfVariables struct {
-	H_drain  *ebpf.Variable `ebpf:"h_drain"`
-	H_onset  *ebpf.Variable `ebpf:"h_onset"`
-	K        *ebpf.Variable `ebpf:"k"`
-	Mu0      *ebpf.Variable `ebpf:"mu_0"`
-	WindowNs *ebpf.Variable `ebpf:"window_ns"`
+	H_drain       *ebpf.Variable `ebpf:"h_drain"`
+	H_onset       *ebpf.Variable `ebpf:"h_onset"`
+	K             *ebpf.Variable `ebpf:"k"`
+	Mu0           *ebpf.Variable `ebpf:"mu_0"`
+	SampleWindows *ebpf.Variable `ebpf:"sample_windows"`
+	WindowNs      *ebpf.Variable `ebpf:"window_ns"`
 }
 
 // bpfPrograms contains all programs after they have been loaded into the kernel.

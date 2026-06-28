@@ -6,7 +6,7 @@
 //   - A bpf_timer embedded in timer_map fires every window_ns nanoseconds
 //     and calls cusum_tick(). The timer re-arms itself at the top of every
 //     invocation so the window is as regular as possible.
-//   - cusum_tick() sums every CPU's slot of node_ingress_bytes (shared with
+//   - cusum_tick() sums every CPU's slot of node_ingr_bytes (shared with
 //     the data-path program via LIBBPF_PIN_BY_NAME), computes the per-window
 //     byte delta against the previous reading stored in cusum_state, then
 //     advances the two-sided CUSUM finite state machine.
@@ -42,6 +42,7 @@ volatile const __u64 k         = 500000;   // slack factor (half the expected st
 volatile const __u64 h_onset   = 5000000;  // onset threshold
 volatile const __u64 h_drain   = 5000000;  // drain threshold
 volatile const __u64 window_ns = 10000000; // 10 ms default window
+volatile const __u8  sample_windows = 0;  // 1 = emit per-window byte sample for offline CUSUM tuning
 
 // ---------------------------------------------------------------------------
 // Event types and structs
@@ -58,6 +59,12 @@ struct burst_event {
 	__u64 window_bytes;  // delta bytes in the triggering window
 };
 
+struct window_sample {
+	__u64 timestamp_ns;
+	__u64 total;   // cumulative bytes since program load
+	__u64 delta;   // bytes in this window
+};
+
 // FSM accumulator storage only — current state (quiescent / burst) lives in
 // the separate burst_flag map (Layer 1's architectural output per CLAUDE.md
 // §2 point 7). Keeping the flag in only one place avoids consistency bugs.
@@ -72,7 +79,7 @@ struct timer_val {
 };
 
 // ---------------------------------------------------------------------------
-// Maps (node_ingress_bytes is declared in shared_maps.h)
+// Maps (node_ingr_bytes is declared in shared_maps.h)
 // ---------------------------------------------------------------------------
 
 // Timer storage. The bpf_timer must live in an ARRAY or HASH map.
@@ -105,6 +112,12 @@ struct {
 	__uint(max_entries, 1 << 16); // 64 KiB — power-of-two required
 } burst_events SEC(".maps");
 
+// Separate from burst_events so the high-rate tuning stream never mixes with onset/drain events.
+struct {
+	__uint(type, BPF_MAP_TYPE_RINGBUF);
+	__uint(max_entries, 1 << 20); // 1 MiB — power-of-two required
+} window_samples SEC(".maps");
+
 // ---------------------------------------------------------------------------
 // Per-CPU counter sum via bpf_loop
 // ---------------------------------------------------------------------------
@@ -124,7 +137,7 @@ struct sum_ctx {
 static long sum_cb(__u32 cpu, struct sum_ctx *ctx)
 {
 	__u32 zero = 0;
-	__u64 *slot = bpf_map_lookup_percpu_elem(&node_ingress_bytes, &zero, cpu);
+	__u64 *slot = bpf_map_lookup_percpu_elem(&node_ingr_bytes, &zero, cpu);
 	if (slot)
 		ctx->total += *slot;
 	return 0;
@@ -185,6 +198,17 @@ static int cusum_tick(void *map, int *key, struct timer_val *val)
 	// reset between ticks. Treat that case as a zero-delta window.
 	__u64 delta = (total >= st->prev_total) ? (total - st->prev_total) : 0;
 	st->prev_total = total;
+
+	// Emit a per-window sample to allow CUSUM tuning if requested (parameter specified at program load).
+	if (sample_windows) {
+		struct window_sample *s = bpf_ringbuf_reserve(&window_samples, sizeof(*s), 0);
+		if (s) {
+			s->timestamp_ns = bpf_ktime_get_ns();
+			s->total        = total;
+			s->delta        = delta;
+			bpf_ringbuf_submit(s, 0);
+		}
+	}
 
 	// Read the FSM's current state from burst_flag — the single source of
 	// truth. burst_flag is also Layer 1's architectural output, so reading

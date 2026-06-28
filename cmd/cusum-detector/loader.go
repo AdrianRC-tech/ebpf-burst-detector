@@ -10,19 +10,20 @@ import (
 
 // bpfPinDir is the BPF filesystem directory that holds maps shared with cusum-detector
 // binary and the ingress-counter binary. Both binaries must agree on this path; the shared
-// node_ingress_bytes map (declared with LIBBPF_PIN_BY_NAME in
-// ebpf/headers/shared_maps.h) is pinned at bpfPinDir/node_ingress_bytes.
+// node_ingr_bytes map (declared with LIBBPF_PIN_BY_NAME in
+// ebpf/headers/shared_maps.h) is pinned at bpfPinDir/node_ingr_bytes.
 const bpfPinDir = "/sys/fs/bpf/burst-detector"
 
 // cusumParams holds the CUSUM tuning parameters baked into the BPF object's
 // .rodata at load time. They cannot be changed after loadCusumDetector returns.
 // A nil pointer means "use the C default baked into the .o file".
 type cusumParams struct {
-	Mu0      *uint64 // baseline bytes per window
-	K        *uint64 // slack factor (half the expected step)
-	HOnset   *uint64 // onset threshold (bytes)
-	HDrain   *uint64 // drain threshold (bytes)
-	WindowNs *uint64 // CUSUM window in nanoseconds
+	Mu0           *uint64 // baseline bytes per window
+	K             *uint64 // slack factor (half the expected step)
+	HOnset        *uint64 // onset threshold (bytes)
+	HDrain        *uint64 // drain threshold (bytes)
+	WindowNs      *uint64 // CUSUM window in nanoseconds
+	SampleWindows *bool   // emit per-window byte samples to the window_samples ringbuf
 }
 
 // detector owns the live BPF objects for the CUSUM program. Caller must call
@@ -33,8 +34,8 @@ type detector struct {
 
 // loadCusumDetector loads the CUSUM BPF object into the kernel.
 //
-// Map sharing: node_ingress_bytes is declared with LIBBPF_PIN_BY_NAME and
-// pinned at bpfPinDir/node_ingress_bytes. cilium/ebpf opens the existing pin
+// Map sharing: node_ingr_bytes is declared with LIBBPF_PIN_BY_NAME and
+// pinned at bpfPinDir/node_ingr_bytes. cilium/ebpf opens the existing pin
 // (created by ingress-counter on first load) and reuses the same kernel map.
 // If the pin does not yet exist (e.g. cusum-detector starts before
 // ingress-counter), cilium/ebpf creates the map and pins it; ingress-counter
@@ -79,6 +80,18 @@ func loadCusumDetector(params cusumParams) (*detector, error) {
 		}
 	}
 
+	// SampleWindows is a bool flag (__u8 in BPF), not a uint64 tunable, so it is
+	// handled separately from the overrides map above.
+	if params.SampleWindows != nil && *params.SampleWindows {
+		vs, ok := spec.Variables["sample_windows"]
+		if !ok {
+			return nil, fmt.Errorf("variable %q not found in BPF object", "sample_windows")
+		}
+		if err := vs.Set(uint8(1)); err != nil {
+			return nil, fmt.Errorf("setting variable %q: %w", "sample_windows", err)
+		}
+	}
+
 	var objs bpfObjects
 	if err := spec.LoadAndAssign(&objs, &ebpf.CollectionOptions{
 		Maps: ebpf.MapOptions{PinPath: bpfPinDir},
@@ -90,14 +103,14 @@ func loadCusumDetector(params cusumParams) (*detector, error) {
 }
 
 // seedPrevTotal initialises cusum_state.PrevTotal to the current sum of
-// node_ingress_bytes across all CPUs. This prevents a spurious onset on the
-// first tick: node_ingress_bytes is pinned and carries accumulated state
+// node_ingr_bytes across all CPUs. This prevents a spurious onset on the
+// first tick: node_ingr_bytes is pinned and carries accumulated state
 // across restarts, while cusum_state is zero-initialised on every load. Without
 // seeding, delta = current_total - 0 = huge -> guaranteed false onset.
 func (d *detector) seedPrevTotal() error {
 	var perCPU []uint64
-	if err := d.objs.NodeIngressBytes.Lookup(uint32(0), &perCPU); err != nil {
-		return fmt.Errorf("reading node_ingress_bytes for seeding: %w", err)
+	if err := d.objs.NodeIngrBytes.Lookup(uint32(0), &perCPU); err != nil {
+		return fmt.Errorf("reading node_ingr_bytes for seeding: %w", err)
 	}
 	var total uint64
 	for _, v := range perCPU {
