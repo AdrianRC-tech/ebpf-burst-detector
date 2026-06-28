@@ -9,5 +9,11 @@ nodes:
   image: burst-detector-node:latest
 - role: worker
   image: burst-detector-node:latest
+  extraMounts:
+  - hostPath: /home/adrian/Desktop/Projects/ebpf-burst-detector/tmp/
+    containerPath: /tmp/ebpf-burst-detector
 - role: worker
   image: burst-detector-node:latest
+  extraMounts:
+  - hostPath: /home/adrian/Desktop/Projects/ebpf-burst-detector/tmp/
+    containerPath: /tmp/ebpf-burst-detector

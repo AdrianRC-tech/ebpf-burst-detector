@@ -7,12 +7,12 @@ k8sServiceHost: burst-detection-lab-control-plane
 k8sServicePort: 6443
 bpfClockProbe: true
 
-prometheus:
-  enabled: true            # cilium-agent metrics on port 9962; pods get prometheus.io/scrape annotation
+# prometheus:
+#   enabled: true            # cilium-agent metrics on port 9962; pods get prometheus.io/scrape annotation
 
-operator:
-  prometheus:
-    enabled: true          # cilium-operator metrics on port 9963
+# operator:
+#   prometheus:
+#     enabled: true          # cilium-operator metrics on port 9963
 
 hubble:
   enabled: true

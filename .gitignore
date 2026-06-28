@@ -116,6 +116,7 @@ StyleCopReport.xml
 *.tli
 *.tlh
 *.tmp
+/tmp/
 *.tmp_proj
 *_wpftmp.csproj
 *.log
@@ -431,6 +432,13 @@ FodyWeavers.xsd
 # Claude Code
 CLAUDE.md
 .claude/
+
+# Git worktrees
+.worktrees/
+
+# Compiled Go binaries (build artifacts)
+/ingress-counter
+/cusum-detector
 
 # Specs
 docs/superpowers/specs/

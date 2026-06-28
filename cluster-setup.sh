@@ -54,24 +54,27 @@ cilium status --wait
 echo "Verify nodes are created and ready:"
 kubectl get nodes
 
-echo "Setting up monitoring stack (lean Prometheus + Grafana)..."
-helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
-helm repo add grafana-community    https://grafana-community.github.io/helm-charts
-helm repo update
+# Setup monitoring stack (Prometheus + Grafana) for observability of Cilium metrics and custom eBPF programs.
+# This configuration was replaced by ebpf program to expose byte counting, since Cilium's built-in metrics do not expose enough granularity for our ingress traffic burst detection goal.
 
-kubectl create namespace monitoring --dry-run=client -o yaml | kubectl apply -f -
+# echo "Setting up monitoring stack (lean Prometheus + Grafana)..."
+# helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+# helm repo add grafana-community    https://grafana-community.github.io/helm-charts
+# helm repo update
 
-helm upgrade --install prometheus prometheus-community/prometheus \
-  --namespace monitoring \
-  --values monitoring/prometheus-values.yaml
+# kubectl create namespace monitoring --dry-run=client -o yaml | kubectl apply -f -
 
-helm upgrade --install grafana grafana-community/grafana \
-  --namespace monitoring \
-  --values monitoring/grafana-values.yaml
+# helm upgrade --install prometheus prometheus-community/prometheus \
+#   --namespace monitoring \
+#   --values monitoring/prometheus-values.yaml
 
-kubectl -n monitoring rollout status deployment/prometheus-server --timeout=120s
-kubectl -n monitoring rollout status deployment/grafana          --timeout=120s
+# helm upgrade --install grafana grafana-community/grafana \
+#   --namespace monitoring \
+#   --values monitoring/grafana-values.yaml
 
-echo ""
-echo "Monitoring stack ready"
+# kubectl -n monitoring rollout status deployment/prometheus-server --timeout=120s
+# kubectl -n monitoring rollout status deployment/grafana          --timeout=120s
+
+# echo ""
+# echo "Monitoring stack ready"
 
