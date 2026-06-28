@@ -110,6 +110,44 @@ func fetchPeerNetlinkInfo(ifindex uint32) (peerNetlinkInfo, error) {
 	return info, nil
 }
 
+// procNetnsEntry is one candidate from the /proc walk: the path to setns into
+// and the netns inode string (from readlink of /proc/<pid>/ns/net).
+type procNetnsEntry struct {
+	Path  string
+	Inode string
+}
+
+// matchNetnsByNsid returns the path of the first entry whose netns nsid equals
+// target, skipping the host netns inode and de-duplicating repeated inodes so
+// queryNsid runs once per distinct netns.
+// queryNsid is injected (live netlink in production, a fake in tests).
+func matchNetnsByNsid(
+	entries []procNetnsEntry,
+	hostInode string,
+	target int32,
+	queryNsid func(path string) (int32, error),
+) (string, error) {
+	seen := make(map[string]struct{})
+	for _, e := range entries {
+		if e.Inode == hostInode {
+			continue
+		}
+		if _, dup := seen[e.Inode]; dup {
+			continue
+		}
+		seen[e.Inode] = struct{}{}
+
+		nsid, err := queryNsid(e.Path)
+		if err != nil {
+			continue
+		}
+		if nsid == target {
+			return e.Path, nil
+		}
+	}
+	return "", fmt.Errorf("no process found for netns id %d", target)
+}
+
 // resolvePodNetnsPath maps a kernel netns ID (from IFLA_LINK_NETNSID) to a
 // /proc/<pid>/ns/net path.
 //
@@ -117,19 +155,23 @@ func fetchPeerNetlinkInfo(ifindex uint32) (peerNetlinkInfo, error) {
 // send RTM_GETNSID (with NETNSA_FD) to ask the kernel what nsid it has in the
 // current (host) network namespace. Return the first path whose nsid matches
 // netnsID. RTM_GETNSID is available since kernel 3.19.
+//
+// The host netns is excluded and identical inodes are queried only once, so
+// the number of RTM_GETNSID calls equals the number of distinct pod namespaces
+// on the node rather than the number of running processes.
 func resolvePodNetnsPath(netnsID int32) (string, error) {
-	// Open a NETLINK_ROUTE socket once and reuse it for all RTM_GETNSID queries.
-	nlConn, err := netlink.Dial(unix.NETLINK_ROUTE, nil)
+	hostInode, err := os.Readlink("/proc/self/ns/net")
 	if err != nil {
-		return "", fmt.Errorf("dialing netlink for nsid resolution: %w", err)
+		return "", fmt.Errorf("reading host netns inode: %w", err)
 	}
-	defer nlConn.Close()
 
-	entries, err := os.ReadDir("/proc")
+	procEntries, err := os.ReadDir("/proc")
 	if err != nil {
 		return "", fmt.Errorf("reading /proc: %w", err)
 	}
-	for _, e := range entries {
+
+	var candidates []procNetnsEntry
+	for _, e := range procEntries {
 		if !e.IsDir() {
 			continue
 		}
@@ -137,16 +179,23 @@ func resolvePodNetnsPath(netnsID int32) (string, error) {
 			continue
 		}
 		nsPath := fmt.Sprintf("/proc/%s/ns/net", e.Name())
-		gotID, err := queryNetnsID(nlConn, nsPath)
+		inode, err := os.Readlink(nsPath)
 		if err != nil {
-			// Not found or permission denied — skip silently.
-			continue
+			continue // process exited or permission denied
 		}
-		if gotID == netnsID {
-			return nsPath, nil
-		}
+		candidates = append(candidates, procNetnsEntry{Path: nsPath, Inode: inode})
 	}
-	return "", fmt.Errorf("no process found for netns id %d", netnsID)
+
+	// Open a NETLINK_ROUTE socket once and pass it into matchNetnsByNsid via closure.
+	nlConn, err := netlink.Dial(unix.NETLINK_ROUTE, nil)
+	if err != nil {
+		return "", fmt.Errorf("dialing netlink for nsid resolution: %w", err)
+	}
+	defer nlConn.Close()
+
+	return matchNetnsByNsid(candidates, hostInode, netnsID, func(path string) (int32, error) {
+		return queryNetnsID(nlConn, path)
+	})
 }
 
 // queryNetnsID opens the netns file at path and asks the kernel (via
@@ -172,10 +221,13 @@ func queryNetnsID(nlConn *netlink.Conn, path string) (int32, error) {
 	// RTM_GETNSID header: rtgenmsg (af_unspec = 1 byte + 3 bytes pad).
 	body := append([]byte{unix.AF_UNSPEC, 0, 0, 0}, attrBytes...)
 
+	// NLM_F_ACK must NOT be set: with ACK the kernel sends RTM_NEWNSID then a
+	// trailing NLMSG_ERROR(0). Execute() returns after the reply and leaves the
+	// ack buffered, desyncing the socket's sequence counter for the next call.
 	req := netlink.Message{
 		Header: netlink.Header{
 			Type:  unix.RTM_GETNSID,
-			Flags: netlink.Request | netlink.Acknowledge,
+			Flags: netlink.Request,
 		},
 		Data: body,
 	}

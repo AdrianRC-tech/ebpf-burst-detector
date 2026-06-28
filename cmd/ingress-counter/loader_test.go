@@ -7,6 +7,124 @@ import (
 	"testing"
 )
 
+func TestMatchNetnsByNsid(t *testing.T) {
+	const hostInode = "net:[4026531992]"
+
+	tests := []struct {
+		name        string
+		entries     []procNetnsEntry
+		target      int32
+		queryNsid   func(path string) (int32, error)
+		wantPath    string
+		wantErr     bool
+		wantErrSub  string
+		wantCalls   int // expected number of queryNsid invocations
+	}{
+		{
+			name: "first matching entry is returned",
+			entries: []procNetnsEntry{
+				{Path: "/proc/100/ns/net", Inode: "net:[111]"},
+				{Path: "/proc/200/ns/net", Inode: "net:[222]"},
+			},
+			target:    111,
+			queryNsid: func(path string) (int32, error) {
+				if path == "/proc/100/ns/net" {
+					return 111, nil
+				}
+				return -1, nil
+			},
+			wantPath:  "/proc/100/ns/net",
+			wantCalls: 1,
+		},
+		{
+			name: "host inode entry is skipped without querying",
+			entries: []procNetnsEntry{
+				{Path: "/proc/1/ns/net", Inode: hostInode},
+				{Path: "/proc/500/ns/net", Inode: "net:[555]"},
+			},
+			target: 5,
+			queryNsid: func(path string) (int32, error) {
+				if path == "/proc/1/ns/net" {
+					t.Error("queryNsid called for host inode entry — must be skipped")
+				}
+				return 5, nil
+			},
+			wantPath:  "/proc/500/ns/net",
+			wantCalls: 1,
+		},
+		{
+			name: "repeated inode is queried only once",
+			entries: []procNetnsEntry{
+				{Path: "/proc/10/ns/net", Inode: "net:[999]"},
+				{Path: "/proc/11/ns/net", Inode: "net:[999]"}, // same inode
+				{Path: "/proc/20/ns/net", Inode: "net:[777]"},
+			},
+			target: 7,
+			queryNsid: func(path string) (int32, error) {
+				if path == "/proc/11/ns/net" {
+					t.Error("queryNsid called for duplicate inode — must be deduped")
+				}
+				if path == "/proc/20/ns/net" {
+					return 7, nil
+				}
+				return -1, nil
+			},
+			wantPath:  "/proc/20/ns/net",
+			wantCalls: 2, // one for net:[999] and one for net:[777]
+		},
+		{
+			name: "no match returns no-process-found error",
+			entries: []procNetnsEntry{
+				{Path: "/proc/99/ns/net", Inode: "net:[888]"},
+			},
+			target:     42,
+			queryNsid:  func(_ string) (int32, error) { return -1, nil },
+			wantErr:    true,
+			wantErrSub: "no process found",
+			wantCalls:  1,
+		},
+		{
+			name: "queryNsid returning unassigned nsid (-1) is tolerated and skipped",
+			entries: []procNetnsEntry{
+				{Path: "/proc/300/ns/net", Inode: "net:[300]"},
+				{Path: "/proc/400/ns/net", Inode: "net:[400]"},
+			},
+			target: 400,
+			queryNsid: func(path string) (int32, error) {
+				if path == "/proc/300/ns/net" {
+					return -1, nil
+				}
+				return 400, nil
+			},
+			wantPath:  "/proc/400/ns/net",
+			wantCalls: 2,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			calls := 0
+			wrapped := func(path string) (int32, error) {
+				calls++
+				return tt.queryNsid(path)
+			}
+			got, err := matchNetnsByNsid(tt.entries, hostInode, tt.target, wrapped)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("matchNetnsByNsid() err = %v, wantErr = %v", err, tt.wantErr)
+			}
+			if tt.wantErr && tt.wantErrSub != "" && !strings.Contains(err.Error(), tt.wantErrSub) {
+				t.Errorf("err = %q, want it to contain %q", err.Error(), tt.wantErrSub)
+			}
+			if !tt.wantErr && got != tt.wantPath {
+				t.Errorf("path = %q, want %q", got, tt.wantPath)
+			}
+			if tt.wantCalls > 0 && calls != tt.wantCalls {
+				t.Errorf("queryNsid called %d times, want %d", calls, tt.wantCalls)
+			}
+		})
+	}
+}
+
 // fakeResolver implements nsResolver for unit testing without a real Cilium agent.
 type fakeResolver struct {
 	ns      string
