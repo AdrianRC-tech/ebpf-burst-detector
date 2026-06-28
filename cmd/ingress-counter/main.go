@@ -35,11 +35,16 @@ func main() {
 // linkEvent is a small decoded view of an RTM_NEWLINK / RTM_DELLINK message.
 // The receiver goroutine pushes these onto a buffered channel so that the
 // kernel netlink socket is drained immediately; the worker goroutine performs
-// the slow Cilium HTTP + attach/detach work without blocking the socket buffer.
+// the slow peer/netns enrichment, Cilium HTTP, and attach/detach work without
+// blocking the socket buffer.
+//
+// For RTM_NEWLINK (add=true), dev carries only Ifindex and Name; the worker
+// calls enrichNetkitDev to populate PeerIfindex and PodNetnsPath before
+// calling attachOne. On enrichment failure the worker logs a warning and skips.
+// For RTM_DELLINK (add=false), only dev.Ifindex and dev.Name are meaningful.
 type linkEvent struct {
-	ifindex uint32
-	name    string
-	add     bool // true = RTM_NEWLINK, false = RTM_DELLINK
+	dev netkitDev
+	add bool // true = RTM_NEWLINK, false = RTM_DELLINK
 }
 
 func run(logger *slog.Logger) error {
@@ -72,7 +77,11 @@ func run(logger *slog.Logger) error {
 		return fmt.Errorf("subscribing to netlink link events: %w", err)
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	// Two-level context: signal.NotifyContext cancels sigCtx on SIGTERM/SIGINT;
+	// cancel() lets error paths cancel ctx explicitly so ctx.Err() is always
+	// set before nlConn.Close() unblocks the receiver goroutine.
+	sigCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, cancel := context.WithCancel(sigCtx)
 
 	// Buffered channel keeps the kernel netlink socket drained; backpressure
 	// moves to the Go channel rather than the fixed kernel socket buffer.
@@ -80,14 +89,30 @@ func run(logger *slog.Logger) error {
 
 	var wg sync.WaitGroup
 
+	// Deferred shutdown respects ordering: goroutines are drained before BPF
+	// objects are torn down. cancel() and stop() are idempotent so calling them
+	// here after the normal shutdown path is a no-op.
+	defer func() {
+		cancel()
+		stop()
+		wg.Wait()
+		att.Close()
+	}()
+
 	// Receiver goroutine: drain the netlink socket and push small linkEvents.
-	// Never calls Cilium or link.AttachNetkit — no slow work here.
+	// Never calls enrichNetkitDev, Cilium, or link.AttachNetkit — no slow work
+	// here. Enrichment is deferred to the worker goroutine so this loop can
+	// keep the kernel RTNL socket buffer empty during pod-creation bursts.
+	//
+	// The loop iterates rawMsgs directly and decodes each message inline to
+	// avoid the parallel-index hazard: rtnetlink's decoder silently drops
+	// unrecognised message types, which would misalign a separate decoded slice.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		defer close(events) // signals worker to drain and exit
 		for {
-			msgs, rawMsgs, err := nlConn.Receive()
+			_, rawMsgs, err := nlConn.Receive()
 			if err != nil {
 				// ctx.Err() is set before nlConn.Close() fires, so this
 				// distinguishes a clean shutdown from an unexpected socket error.
@@ -97,9 +122,12 @@ func run(logger *slog.Logger) error {
 				logger.Error("netlink receive error", "err", err)
 				return
 			}
-			for i, msg := range msgs {
-				linkMsg, ok := msg.(*rtnetlink.LinkMessage)
-				if !ok {
+			for _, raw := range rawMsgs {
+				if raw.Header.Type != unix.RTM_NEWLINK && raw.Header.Type != unix.RTM_DELLINK {
+					continue
+				}
+				var linkMsg rtnetlink.LinkMessage
+				if err := linkMsg.UnmarshalBinary(raw.Data); err != nil {
 					continue
 				}
 				// Guard against messages without IFLA_LINKINFO (valid for some RTM types).
@@ -108,43 +136,64 @@ func run(logger *slog.Logger) error {
 					linkMsg.Attributes.Info.Kind != "netkit" {
 					continue
 				}
-				var add bool
-				switch rawMsgs[i].Header.Type {
-				case unix.RTM_NEWLINK:
-					add = true
-				case unix.RTM_DELLINK:
-					add = false
-				default:
-					continue
+				base := netkitDev{
+					Ifindex: uint32(linkMsg.Index),
+					Name:    linkMsg.Attributes.Name,
 				}
-				events <- linkEvent{
-					ifindex: uint32(linkMsg.Index),
-					name:    linkMsg.Attributes.Name,
-					add:     add,
+				switch raw.Header.Type {
+				case unix.RTM_NEWLINK:
+					// Push only the lightweight base dev; the worker enriches it.
+					select {
+					case events <- linkEvent{dev: base, add: true}:
+					case <-ctx.Done():
+						return
+					}
+				case unix.RTM_DELLINK:
+					select {
+					case events <- linkEvent{dev: base, add: false}:
+					case <-ctx.Done():
+						return
+					}
 				}
 			}
 		}
 	}()
 
 	// Worker goroutine: the sole consumer of events and the only caller of
-	// attachOne/detachOne. Single consumer means the resolver has exactly one
-	// accessor at runtime, removing the need for external synchronisation.
+	// enrichNetkitDev, attachOne, and detachOne. Single consumer means the
+	// resolver has exactly one accessor at runtime, removing the need for
+	// external synchronisation. Enrichment (slow netlink + /proc walk) runs
+	// here so the receiver goroutine is never blocked.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		for ev := range events {
 			if ev.add {
-				reason, err := att.attachOne(ev.ifindex, resolver, allowedNS)
+				// If PeerIfindex is already set (startup snapshot via
+				// discoverNetkitDevices), skip enrichment to avoid a redundant
+				// netlink + /proc walk. RTM_NEWLINK events from the receiver
+				// carry only Ifindex and Name and always need enrichment.
+				dev := ev.dev
+				if dev.PeerIfindex == 0 {
+					var err error
+					dev, err = enrichNetkitDev(ev.dev, fetchPeerNetlinkInfo, resolvePodNetnsPath)
+					if err != nil {
+						logger.Warn("skipping RTM_NEWLINK: peer/netns resolution failed",
+							"ifindex", ev.dev.Ifindex, "name", ev.dev.Name, "err", err)
+						continue
+					}
+				}
+				reason, err := att.attachOne(dev, resolver, allowedNS)
 				if err != nil {
-					logger.Error("attach failed", "ifindex", ev.ifindex, "name", ev.name, "err", err)
+					logger.Error("attach failed", "ifindex", dev.Ifindex, "name", dev.Name, "err", err)
 					continue
 				}
-				logger.Info("netlink attach", "ifindex", ev.ifindex, "name", ev.name, "result", reason)
+				logger.Info("netlink attach", "ifindex", dev.Ifindex, "name", dev.Name, "result", reason)
 			} else {
-				if err := att.detachOne(ev.ifindex); err != nil {
-					logger.Error("detach failed", "ifindex", ev.ifindex, "name", ev.name, "err", err)
+				if err := att.detachOne(ev.dev.Ifindex); err != nil {
+					logger.Error("detach failed", "ifindex", ev.dev.Ifindex, "name", ev.dev.Name, "err", err)
 				}
-				logger.Info("netlink detach", "ifindex", ev.ifindex, "name", ev.name)
+				logger.Info("netlink detach", "ifindex", ev.dev.Ifindex, "name", ev.dev.Name)
 			}
 		}
 	}()
@@ -152,25 +201,31 @@ func run(logger *slog.Logger) error {
 	// Feed the startup snapshot through the same channel so everything is
 	// serialized through the worker; idempotent attachOne deduplicates any
 	// overlap with events that arrived between subscribe and enumerate.
+	// discoverNetkitDevices already enriches each dev (peer ifindex + netns
+	// path), so the worker skips re-enrichment when PeerIfindex is non-zero.
 	peers, err := discoverNetkitDevices()
 	if err != nil {
-		stop()
+		cancel()
 		nlConn.Close()
-		wg.Wait()
-		att.Close()
 		return fmt.Errorf("discovering netkit devices: %w", err)
 	}
 	for _, dev := range peers {
-		events <- linkEvent{ifindex: dev.Ifindex, name: dev.Name, add: true}
+		select {
+		case events <- linkEvent{dev: dev, add: true}:
+		case <-ctx.Done():
+			nlConn.Close()
+			return ctx.Err()
+		}
 	}
 
-	// Block until the process receives a shutdown signal, then run the ordered
-	// shutdown sequence so all netkit links are detached cleanly before exit.
-	// Ordered shutdown: stop() → nlConn.Close() → wg.Wait() → att.Close()
+	// Ordered shutdown: cancel()/stop() → nlConn.Close() → wg.Wait() → att.Close().
+	// cancel() cancels ctx so receiver goroutine sees ctx.Err() != nil before
+	// the socket error; stop() releases the OS signal subscription;
+	// nlConn.Close() unblocks the receiver goroutine; wg.Wait() drains the
+	// event channel before att.Close() tears down BPF objects and the fd table.
+	// The deferred closure above handles wg.Wait() + att.Close().
 	<-ctx.Done()
 	stop()
 	nlConn.Close()
-	wg.Wait()
-	att.Close()
 	return nil
 }

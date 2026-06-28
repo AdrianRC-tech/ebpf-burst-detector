@@ -436,6 +436,10 @@ CLAUDE.md
 # Git worktrees
 .worktrees/
 
+# Compiled Go binaries (build artifacts)
+/ingress-counter
+/cusum-detector
+
 # Specs
 docs/superpowers/specs/
 
