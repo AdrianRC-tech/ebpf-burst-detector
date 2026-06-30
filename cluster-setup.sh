@@ -47,7 +47,7 @@ helm upgrade --install cilium cilium/cilium \
   --namespace kube-system \
   --values cilium-values.yaml
 
-kubectl -n kube-system rollout status daemonset/cilium --timeout=120s
+kubectl -n kube-system rollout status daemonset/cilium --timeout=240s
 cilium status --wait
 
 
