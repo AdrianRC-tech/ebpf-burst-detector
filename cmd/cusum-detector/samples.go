@@ -10,6 +10,8 @@ import (
 	"strconv"
 
 	"github.com/cilium/ebpf/ringbuf"
+
+	"github.com/AdrianRC-tech/ebpf-burst-detector/internal/walltime"
 )
 
 const windowSampleSize = 24
@@ -35,7 +37,12 @@ func sampleLoop(logger *slog.Logger, w io.Writer, rd *ringbuf.Reader) error {
 	cw := csv.NewWriter(w)
 	defer cw.Flush()
 
-	if err := cw.Write([]string{"timestamp_ns", "total_bytes", "delta_bytes"}); err != nil {
+	anchor, anchorErr := walltime.Now()
+	if anchorErr != nil {
+		logger.Warn("failed to capture wall-clock anchor; time_utc column will be empty", "err", anchorErr)
+	}
+
+	if err := cw.Write([]string{"timestamp_ns", "total_bytes", "delta_bytes", "time_utc"}); err != nil {
 		return fmt.Errorf("writing csv header: %w", err)
 	}
 	cw.Flush()
@@ -55,10 +62,16 @@ func sampleLoop(logger *slog.Logger, w io.Writer, rd *ringbuf.Reader) error {
 			continue
 		}
 
+		wallStr := ""
+		if anchorErr == nil {
+			wallStr = anchor.WallClockString(s.TimestampNs)
+		}
+
 		if err := cw.Write([]string{
 			strconv.FormatUint(s.TimestampNs, 10),
 			strconv.FormatUint(s.Total, 10),
 			strconv.FormatUint(s.Delta, 10),
+			wallStr,
 		}); err != nil {
 			return fmt.Errorf("writing csv row: %w", err)
 		}

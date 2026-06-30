@@ -2,15 +2,21 @@
 // byte counter. It attaches a tcx-ingress BPF program to every pod's netkit
 // peer device (via a brief setns crossing) in the specified Kubernetes namespaces.
 // Pod lifecycle is tracked via a RTNLGRP_LINK netlink subscription so the daemon
-// reacts to creations and deletions without polling. The daemon is silent after
-// attach/detach log lines — byte-per-window analysis is delegated to
-// cusum-detector --sample-windows.
+// reacts to creations and deletions without polling.
+//
+// Pass --trace-packets to enable opt-in per-packet tracing (debug only). Each
+// packet record carries timestamp_ns, len, and the IPv4 5-tuple; records are
+// written as CSV to --trace-csv (or stderr). Byte-per-window analysis is
+// delegated to cusum-detector --sample-windows; offline reconciliation uses
+// cmd/trace-crosscheck.
 package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -18,6 +24,7 @@ import (
 	"sync"
 	"syscall"
 
+	"github.com/cilium/ebpf/ringbuf"
 	"github.com/jsimonetti/rtnetlink/v2"
 	"github.com/mdlayher/netlink"
 	"golang.org/x/sys/unix"
@@ -50,8 +57,10 @@ type linkEvent struct {
 func run(logger *slog.Logger) error {
 	namespacesFlag := flag.String("namespaces", "default", "comma-separated allow-list of Kubernetes namespaces to attach to")
 	ciliumSocket := flag.String("cilium-socket", "/var/run/cilium/cilium.sock", "path to Cilium agent unix socket")
+	tracePackets := flag.Bool("trace-packets", false, "emit per-packet trace records (debug only; off by default)")
+	traceCSV := flag.String("trace-csv", "", "path to write packet trace CSV (default: stderr)")
 	flag.Parse()
-
+	fmt.Printf("tracePackets=%v traceCSV=%q ", *tracePackets, *traceCSV)
 	allowedNS := make(map[string]struct{})
 	for _, ns := range strings.Split(*namespacesFlag, ",") {
 		if ns = strings.TrimSpace(ns); ns != "" {
@@ -59,7 +68,7 @@ func run(logger *slog.Logger) error {
 		}
 	}
 
-	att, err := initAttachment()
+	att, err := initAttachment(*tracePackets)
 	if err != nil {
 		return fmt.Errorf("initializing attachment: %w", err)
 	}
@@ -98,6 +107,48 @@ func run(logger *slog.Logger) error {
 		wg.Wait()
 		att.Close()
 	}()
+
+	if *tracePackets {
+		var csvOut io.Writer = os.Stderr
+		if *traceCSV != "" {
+			f, err := os.Create(*traceCSV)
+			if err != nil {
+				cancel()
+				nlConn.Close()
+				return fmt.Errorf("opening trace CSV file %q: %w", *traceCSV, err)
+			}
+			defer f.Close()
+			csvOut = f
+		}
+
+		trd, err := ringbuf.NewReader(att.objs.PktTraceRb)
+		if err != nil {
+			cancel()
+			nlConn.Close()
+			return fmt.Errorf("creating packet trace ringbuf reader: %w", err)
+		}
+		defer trd.Close()
+
+		go func() {
+			<-ctx.Done()
+			trd.Close()
+		}()
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := traceLoop(logger, csvOut, trd); err != nil && !errors.Is(err, ringbuf.ErrClosed) {
+				logger.Error("trace loop terminated with error", "err", err)
+			}
+		}()
+
+		logger.Info("per-packet trace enabled", "csv", func() string {
+			if *traceCSV != "" {
+				return *traceCSV
+			}
+			return "stderr"
+		}())
+	}
 
 	// Receiver goroutine: drain the netlink socket and push small linkEvents.
 	// Never calls enrichNetkitDev, Cilium, or link.AttachNetkit — no slow work

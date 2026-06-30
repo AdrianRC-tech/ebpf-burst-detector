@@ -466,15 +466,30 @@ func discoverNetkitDevices() ([]netkitDev, error) {
 
 // initAttachment loads the BPF objects with map pinning and returns an
 // attachment ready for per-device attachOne calls. No devices are attached yet.
-func initAttachment() (*attachment, error) {
+// When tracePackets is true, the trace_packets .rodata constant is set to 1 so
+// the data-path program emits per-packet records to pkt_trace_rb.
+func initAttachment(tracePackets bool) (*attachment, error) {
 	if err := rlimit.RemoveMemlock(); err != nil {
 		return nil, fmt.Errorf("removing memlock rlimit: %w", err)
 	}
 	if err := os.MkdirAll(bpfPinDir, 0o755); err != nil {
 		return nil, fmt.Errorf("creating pin dir %s: %w", bpfPinDir, err)
 	}
+	spec, err := loadBpf()
+	if err != nil {
+		return nil, fmt.Errorf("loading bpf collection spec: %w", err)
+	}
+	if tracePackets {
+		vs, found := spec.Variables["trace_packets"]
+		if !found {
+			return nil, fmt.Errorf("variable %q not found in BPF object", "trace_packets")
+		}
+		if err := vs.Set(uint8(1)); err != nil {
+			return nil, fmt.Errorf("setting trace_packets: %w", err)
+		}
+	}
 	var objs bpfObjects
-	if err := loadBpfObjects(&objs, &ebpf.CollectionOptions{
+	if err := spec.LoadAndAssign(&objs, &ebpf.CollectionOptions{
 		Maps: ebpf.MapOptions{PinPath: bpfPinDir},
 	}); err != nil {
 		return nil, fmt.Errorf("loading bpf objects: %w", err)

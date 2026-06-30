@@ -129,6 +129,24 @@ peer devices live.
    exits. Byte-per-window analysis is handled by `cusum-detector
    --sample-windows` — see [Run the CUSUM burst detector](#run-the-cusum-burst-detector-iteration-2).
 
+### A note on non-IPv4 packets (IPv6 NDP/MLD)
+
+With `--trace-packets` you will see occasional trace rows with an all-zero tuple and
+`protocol=0`, e.g. `len=70, src_ip=0.0.0.0, dst_ip=0.0.0.0, src_port=0, dst_port=0`. These are
+**non-IPv4 packets**: the data-path program only decodes IPv4 (`skb->protocol == ETH_P_IP`) and
+records just the timestamp and `skb->len` for anything else (`family=0`). On this IPv4-only
+Cilium cluster they are almost always **IPv6 Neighbor Discovery (NDP) / MLD link-local chatter** —
+the kernel brings up an IPv6 link-local address on every interface (including each pod's netkit
+peer) even though IPv6 is disabled at the CNI layer. They are *not* Kubernetes health checks
+(those are IPv4 TCP and decode with a real tuple and `protocol=6`).
+
+> **These bytes are counted on purpose.** `node_ingr_bytes` adds `skb->len` for every packet
+> regardless of L3 protocol, so this IPv6 chatter is included in the CUSUM baseline. That is
+> deliberate: Linux really does deliver these bytes to the pod's interface, so they are genuine
+> ingress and belong in the node-wide byte signal. The volume is tiny (link-local bring-up only)
+> and it does not break `trace-crosscheck` — the packets are still logged with their `len`, so
+> `packet_sum` and `delta_bytes` stay balanced.
+
 ---
 
 ---
