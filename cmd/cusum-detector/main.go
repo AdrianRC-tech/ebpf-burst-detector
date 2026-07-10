@@ -41,6 +41,7 @@ func run(logger *slog.Logger) error {
 	window := flag.Duration("window", 0, "CUSUM window duration (e.g. 10ms, 5ms) (default: C constant)")
 	sampleWindows := flag.Bool("sample-windows", false, "emit per-window byte samples to CSV for CUSUM parameter tuning")
 	sampleCSV := flag.String("sample-csv", "", "path to write window sample CSV (default: stderr)")
+	eventCSV := flag.String("event-csv", "", "path to write onset/drain events as CSV for offline latency analysis (default: slog to stderr)")
 	flag.Parse()
 
 	// Build params with only the flags the user explicitly provided.
@@ -140,7 +141,20 @@ func run(logger *slog.Logger) error {
 		}()
 	}
 
-	eventErr := eventLoop(logger, rd)
+	var eventErr error
+	if *eventCSV != "" {
+		f, err := os.Create(*eventCSV)
+		if err != nil {
+			stop()
+			wg.Wait()
+			return fmt.Errorf("opening event CSV file %q: %w", *eventCSV, err)
+		}
+		defer f.Close()
+		logger.Info("logging burst events to CSV", "path", *eventCSV)
+		eventErr = eventLogLoop(logger, f, rd)
+	} else {
+		eventErr = eventLoop(logger, rd)
+	}
 
 	// Cancel context so the srd closer goroutine fires and sampleLoop unblocks.
 	stop()
