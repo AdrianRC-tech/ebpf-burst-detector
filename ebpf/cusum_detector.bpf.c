@@ -41,7 +41,7 @@ volatile const __u64 mu_0      = 1000000;  // baseline bytes per window
 volatile const __u64 k         = 500000;   // slack factor (half the expected step)
 volatile const __u64 h_onset   = 5000000;  // onset threshold
 volatile const __u64 h_drain   = 5000000;  // drain threshold
-volatile const __u64 window_ns = 10000000; // 10 ms default window
+volatile const __u64 window_ns = 100000000; // 100 ms default window
 volatile const __u8  sample_windows = 0;  // 1 = emit per-window byte sample for offline CUSUM tuning
 
 // ---------------------------------------------------------------------------
@@ -72,6 +72,8 @@ struct cusum_state_t {
 	__s64 upper_sum;    // CUSUM+ accumulator (clamped >= 0)
 	__s64 lower_sum;    // CUSUM- accumulator (clamped >= 0)
 	__u64 prev_total;   // total bytes at end of previous window
+	__u64 mu_burst;     // burst-level estimate; seeded at onset, used as drain reference
+	__u64 k_drain;      // drain slack; computed at onset = (mu_burst - mu_0) / 2 (design-decisions §4)
 };
 
 struct timer_val {
@@ -218,7 +220,7 @@ static int cusum_tick(void *map, int *key, struct timer_val *val)
 		return 0;
 
 	if (*flag == 0) {
-		// Upper CUSUM, detecting burst onset
+		// Upper CUSUM, detecting burst onset.
 		// CUSUM+ Formula: upper_sum = max(0, upper_sum + (delta - mu_0 - k))
 		st->upper_sum += (__s64)delta - (__s64)mu_0 - (__s64)k;
 		if (st->upper_sum < 0)
@@ -228,11 +230,13 @@ static int cusum_tick(void *map, int *key, struct timer_val *val)
 			set_burst_flag(1);
 			st->upper_sum = 0;
 			st->lower_sum = 0;
+			st->mu_burst =  delta;
+			st->k_drain  = (delta > mu_0) ? (delta - mu_0) / 2 : 0;
 		}
 	} else {
-		// Lower CUSUM, detecting burst drain
-		// CUSUM- Formula: lower_sum = max(0, lower_sum + (mu_0 - k - delta))
-		st->lower_sum += (__s64)mu_0 - (__s64)k - (__s64)delta;
+		// Lower CUSUM, detecting burst drain.
+		// CUSUM- Formula: lower_sum = max(0, lower_sum + (mu_burst - k_drain - delta))
+		st->lower_sum += (__s64)st->mu_burst - (__s64)st->k_drain - (__s64)delta;
 		if (st->lower_sum < 0)
 			st->lower_sum = 0;
 		if (st->lower_sum >= h_drain) {
@@ -240,6 +244,8 @@ static int cusum_tick(void *map, int *key, struct timer_val *val)
 			set_burst_flag(0);
 			st->upper_sum = 0;
 			st->lower_sum = 0;
+			st->mu_burst  = 0;
+			st->k_drain   = 0;
 		}
 	}
 	return 0;

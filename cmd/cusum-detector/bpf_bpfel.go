@@ -18,6 +18,8 @@ type bpfCusumStateT struct {
 	UpperSum  int64
 	LowerSum  int64
 	PrevTotal uint64
+	MuBurst   uint64
+	K_drain   uint64
 }
 
 type bpfTimerVal struct {
