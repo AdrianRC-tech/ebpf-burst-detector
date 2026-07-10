@@ -22,13 +22,23 @@ docker start $(docker ps -aq --filter "label=io.x-k8s.kind.cluster=burst-detecti
 # Configure kubectl again
 kubectl cluster-info --context kind-burst-detection-lab
 
-# Run load benchmark
+# Run single load benchmark
 wrk2/wrk -D exp -t 3 -c 100 -d 2 -L -s benchmark/hotelReservation/wrk2/scripts/hotel-reservation/mixed-workload_type_1.lua http://localhost:5000 -R 100
 
-# Check fro existing pods which are in hostNetwork and which have their own network namespace (own netkit devices). Cilium_health device created by cilium to test connectivity.
+# Check from existing pods which are in hostNetwork and which have their own network namespace (own netkit devices). Cilium_health device created by cilium to test connectivity.
 kubectl get pods -A \
   --field-selector spec.nodeName=burst-detection-lab-worker \
   -o custom-columns='NS:.metadata.namespace,NAME:.metadata.name,HOSTNET:.spec.hostNetwork'
 
 # Check registerd networking endpoint at each cilium agent. 
 cilium endpoint list -o json | jq '.[].status.networking'
+
+# Valiadte windows sum fits the per packet tracing
+./bin/trace-crosscheck --trace-csv tmp/packet_trace.csv --samples-csv tmp/windows_cusum.csv
+
+# Compute CUSUM stats from baseline rate extraction
+./bin/baseline-stats --samples-csv /tmp/windows_cusum.csv
+
+# Burst on loop
+./run-burst-load.sh <rate> <seq> <sleep>
+./run-burst-load.sh 100 15 10

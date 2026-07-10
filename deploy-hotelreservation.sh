@@ -68,6 +68,24 @@ for svc in frontend geo profile rate recommendation reservation search user; do
   kubectl set image deployment/"$svc" "hotel-reserv-$svc=$IMAGE" 2>/dev/null || true
 done
 
+# OPTIONAL: Additional instructions to limit memory usage by PODs due to hitting oom in host.
+# echo "Applying memory limits to bound host RAM..."
+# for svc in frontend geo profile rate recommendation reservation search user; do
+#   kubectl set resources deployment/"$svc" \
+#     --requests=memory=64Mi --limits=memory=200Mi 2>/dev/null || true
+# done
+# for svc in mongodb-geo mongodb-profile mongodb-rate \
+#            mongodb-recommendation mongodb-reservation mongodb-user; do
+#   kubectl set resources deployment/"$svc" \
+#     --requests=memory=128Mi --limits=memory=300Mi 2>/dev/null || true
+# done
+# for svc in memcached-profile memcached-rate memcached-reserve; do
+#   kubectl set resources deployment/"$svc" \
+#     --requests=memory=32Mi --limits=memory=96Mi 2>/dev/null || true
+# done
+# kubectl set resources deployment/consul --requests=memory=96Mi --limits=memory=256Mi 2>/dev/null || true
+# kubectl set resources deployment/jaeger --requests=memory=128Mi --limits=memory=400Mi 2>/dev/null || true
+
 echo "Waiting for all pods to be ready (timeout 5 min)..."
 kubectl wait --for=condition=ready pod --all --timeout=400s
 

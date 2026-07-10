@@ -19,28 +19,6 @@ TARGET="${TARGET:-http://localhost:5000}"
 
 PF_PID=0  # PID of the port-forward we own (0 = we didn't start it)
 
-# ── Phase 1: Ensure wrk2 binary ───────────────────────────────────────────────
-
-echo "=== Phase 1: wrk2 binary ==="
-
-if [ ! -f "$WRK2_DIR/wrk" ]; then
-  echo "  wrk binary not found — building wrk2..."
-  if ! command -v make &>/dev/null; then
-    echo "ERROR: 'make' not found. Install build tools:" >&2
-    echo "       sudo apt-get install -y build-essential libssl-dev" >&2
-    exit 1
-  fi
-  if ! dpkg -s libssl-dev &>/dev/null 2>&1; then
-    echo "  Installing build dependencies (build-essential libssl-dev)..."
-    sudo apt-get install -y build-essential libssl-dev
-  fi
-  echo "  Running make -C wrk2/ (this takes ~1-2 min the first time)..."
-  make -C "$WRK2_DIR"
-  echo "  [OK] wrk built at $WRK2_DIR/wrk"
-else
-  echo "  [OK] wrk already built: $WRK2_DIR/wrk"
-fi
-
 # ── Phase 2: Run wrk2 steady-baseline load ────────────────────────────────────
 
 echo "=== Phase 2: Load (rate=${RATE} rps  duration=${DURATION}s  threads=${THREADS}  conns=${CONNS}) ==="
