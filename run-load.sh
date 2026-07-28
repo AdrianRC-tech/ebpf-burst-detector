@@ -6,16 +6,21 @@ HOTEL_RES_DIR="$(realpath "$SCRIPT_DIR/benchmark/hotelReservation")"
 WRK2_DIR="$(realpath "$SCRIPT_DIR/wrk2")"
 LUA_SCRIPT="$HOTEL_RES_DIR/wrk2/scripts/hotel-reservation/mixed-workload_type_1.lua"
 
-# ── Parameters (override via env vars) ────────────────────────────────────────
-# Defaults are tuned for a steady baseline run (mu_0 derivation):
-# - Low rate (80 rps) produces a stable, low-variance signal.
-# - 1h  duration gives the scenario a baseline for the ingress-counter.
-# - 100 connections > 3 threads so threads are possibly not idle waiting for sockets.
-RATE="${RATE:-80}"        # requests/sec (-R); constant throughput model
-DURATION="${DURATION:-3600}" # seconds (-d); long enough for the counter to settle
-THREADS="${THREADS:-3}"    # worker threads (-t)
-CONNS="${CONNS:-100}"       # open connections (-c); keep > THREADS
-TARGET="${TARGET:-http://localhost:5000}"
+if [ "$#" -ne 5 ]; then
+  echo "Usage: $0 <rate> <duration> <threads> <conns> <target>" >&2
+  echo "  rate     requests/sec (-R); constant throughput model" >&2
+  echo "  duration seconds (-d); e.g. 3600 for a baseline run long enough for the counter to settle" >&2
+  echo "  threads  worker threads (-t)" >&2
+  echo "  conns    open connections (-c); keep > threads" >&2
+  echo "  target   base URL, e.g. http://172.18.0.x:<NodePort>" >&2
+  exit 1
+fi
+
+RATE="$1"
+DURATION="$2"
+THREADS="$3"
+CONNS="$4"
+TARGET="$5"
 
 PF_PID=0  # PID of the port-forward we own (0 = we didn't start it)
 

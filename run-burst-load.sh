@@ -19,10 +19,13 @@ SLEEP="$3"
 
 for i in $(seq "$SEQ"); do
   echo "burst_start i=$i $(date +%s%N)"
-  "$WRK" -D exp -t 3 -c 100 -d 1 -L -s "$LUA_SCRIPT" http://localhost:5000 -R "$RATE"
+  "$WRK" -D exp -t 3 -c 100 -d 1 -L -s "$LUA_SCRIPT" http://172.18.0.2:30500 -R "$RATE"
   echo "burst_end   i=$i $(date +%s%N)"
 
   if [ "$i" -lt "$SEQ" ]; then
     sleep "$SLEEP"
   fi
 done
+
+
+# If using kubectl port-forwarding replace dest_ip with http://localhost:5000

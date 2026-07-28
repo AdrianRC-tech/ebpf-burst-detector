@@ -95,7 +95,10 @@ echo ""
 echo "=== Deployment complete ==="
 echo ""
 echo "Expose the frontend:"
-echo "  kubectl port-forward svc/frontend 5000:5000"
+echo "  kubectl port-forward svc/frontend 5000:5000
+        OR
+        curl http://<internal-ip-of-any-of-the-nodes>:30500
+"
 echo ""
 echo "Run load test (in a separate terminal after port-forward):"
 echo "  $WRK2_DIR/wrk -D exp -t 2 -c 2 -d 30 -L \\"
