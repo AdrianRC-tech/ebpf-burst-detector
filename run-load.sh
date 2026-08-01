@@ -29,9 +29,7 @@ PF_PID=0  # PID of the port-forward we own (0 = we didn't start it)
 echo "=== Phase 2: Load (rate=${RATE} rps  duration=${DURATION}s  threads=${THREADS}  conns=${CONNS}) ==="
 echo ""
 echo "  Running mixed-workload (60% search, 39% recommend, 1% login/reserve)"
-echo "  against $TARGET — this is your mu_0 measurement window."
-echo "  In a separate terminal run: cusum-detector -window 100ms -sample-windows -sample-csv /tmp/windows.csv
-  Watch per-window delta_bytes rows accumulate in /tmp/windows.csv to derive mu_0/k/h_* values."
+echo "  against $TARGET"
 echo ""
 
 "$WRK2_DIR/wrk" \

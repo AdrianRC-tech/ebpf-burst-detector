@@ -17,10 +17,23 @@ RATE="$1"
 SEQ="$2"
 SLEEP="$3"
 
+human_ts() {
+  local ns="$1" secs nanos
+  secs="${ns:0:-9}"
+  nanos="${ns: -9}"
+  printf '%s.%s' "$(date -d "@$secs" +%H:%M:%S)" "$nanos"
+}
+
 for i in $(seq "$SEQ"); do
-  echo "burst_start i=$i $(date +%s%N)"
-  "$WRK" -D exp -t 3 -c 100 -d 1 -L -s "$LUA_SCRIPT" http://172.18.0.2:30500 -R "$RATE"
-  echo "burst_end   i=$i $(date +%s%N)"
+  ts_start="$(date +%s%N)"
+  echo " --> i=$i"
+  echo " --> burst_start $(human_ts "$ts_start")  <-- "
+  echo ""
+  "$WRK" -D exp -t 4 -c 20 -d 1 -s "$LUA_SCRIPT" http://172.18.0.2:30500 -R "$RATE"
+  ts_end="$(date +%s%N)" # -L (latency analysis flag) out to reduce output noise, but we still want to know when the burst ended
+  echo ""
+  echo " --> burst_end   i=$i $(human_ts "$ts_end") <-- "
+  echo ""
 
   if [ "$i" -lt "$SEQ" ]; then
     sleep "$SLEEP"
