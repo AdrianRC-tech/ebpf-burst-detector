@@ -443,6 +443,9 @@ CLAUDE.md
 # Specs
 docs/superpowers/specs/
 docs/
+! docs/conclusions_from_first_experiments.md
+! docs/design-decisions-cusum-calibration.md
+! docs/design-decisions-layer-1-to-layer-2-interface.md
 
 # Burst Detector — generated artifacts
 /bin/
@@ -462,5 +465,4 @@ bin/
 wrk2/
 
 # Notes
-docs/experiment-methodology.md
 execution-planning.md
