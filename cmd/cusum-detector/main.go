@@ -37,7 +37,8 @@ func run(logger *slog.Logger) error {
 	mu0 := flag.Uint64("mu0", 0, "baseline bytes per CUSUM window (default: C constant)")
 	k := flag.Uint64("k", 0, "CUSUM slack factor in bytes (default: C constant)")
 	hOnset := flag.Uint64("h-onset", 0, "onset threshold (upper_sum value) in bytes (default: C constant)")
-	hDrain := flag.Uint64("h-drain", 0, "drain threshold (lower_sum value) in bytes (default: C constant)")
+	hDrain := flag.Uint64("h-drain", 0, "static drain threshold in bytes (default: derived as h-slack-mult × k_drain; set explicitly only to reproduce pre-derivation runs)")
+	hSlackMult := flag.Uint64("h-slack-mult", 0, "drain threshold in slack units, h_drain = h-slack-mult × k_drain (default: derived from h_onset/k, i.e. the onset arm's own operating point)")
 	window := flag.Duration("window", 0, "CUSUM window duration (e.g. 10ms, 5ms) (default: C constant)")
 	sampleWindows := flag.Bool("sample-windows", false, "emit per-window byte samples to CSV for CUSUM parameter tuning")
 	sampleCSV := flag.String("sample-csv", "", "path to write window sample CSV (default: stderr)")
@@ -57,6 +58,8 @@ func run(logger *slog.Logger) error {
 			params.HOnset = hOnset
 		case "h-drain":
 			params.HDrain = hDrain
+		case "h-slack-mult":
+			params.HSlackMult = hSlackMult
 		case "window":
 			ns := uint64(window.Nanoseconds())
 			params.WindowNs = &ns
@@ -79,11 +82,18 @@ func run(logger *slog.Logger) error {
 		return fmt.Errorf("arming timer: %w", err)
 	}
 
+	hDrainMode := "derived"
+	if params.HDrain != nil {
+		hDrainMode = "static"
+	}
+
 	logger.Info("cusum detector armed",
 		"mu0", uint64OrDefault(params.Mu0),
 		"k", uint64OrDefault(params.K),
 		"h_onset", uint64OrDefault(params.HOnset),
 		"h_drain", uint64OrDefault(params.HDrain),
+		"h_slack_mult", det.hSlackMult,
+		"h_drain_mode", hDrainMode,
 		"window", windowOrDefault(params.WindowNs),
 		"pin_dir", bpfPinDir,
 	)

@@ -47,6 +47,6 @@ cilium endpoint list -o json | jq '.[].status.networking'
 ./run-burst-load.sh 100 15 10
 
 ## Cleanup bpf maps and programs after run
-pkill -f ingress-coutner
+pkill -f ingress-counter
 pkill -f cusum-detector
 rm -rf /sys/fs/bpf/burst-detector

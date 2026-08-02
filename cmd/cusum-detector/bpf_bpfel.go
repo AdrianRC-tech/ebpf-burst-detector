@@ -20,6 +20,7 @@ type bpfCusumStateT struct {
 	PrevTotal uint64
 	MuBurst   uint64
 	K_drain   uint64
+	H_drain   uint64
 }
 
 type bpfTimerVal struct {
@@ -93,6 +94,7 @@ type bpfMapSpecs struct {
 type bpfVariableSpecs struct {
 	H_drain       *ebpf.VariableSpec `ebpf:"h_drain"`
 	H_onset       *ebpf.VariableSpec `ebpf:"h_onset"`
+	H_slackMult   *ebpf.VariableSpec `ebpf:"h_slack_mult"`
 	K             *ebpf.VariableSpec `ebpf:"k"`
 	Mu0           *ebpf.VariableSpec `ebpf:"mu_0"`
 	SampleWindows *ebpf.VariableSpec `ebpf:"sample_windows"`
@@ -144,6 +146,7 @@ func (m *bpfMaps) Close() error {
 type bpfVariables struct {
 	H_drain       *ebpf.Variable `ebpf:"h_drain"`
 	H_onset       *ebpf.Variable `ebpf:"h_onset"`
+	H_slackMult   *ebpf.Variable `ebpf:"h_slack_mult"`
 	K             *ebpf.Variable `ebpf:"k"`
 	Mu0           *ebpf.Variable `ebpf:"mu_0"`
 	SampleWindows *ebpf.Variable `ebpf:"sample_windows"`

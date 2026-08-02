@@ -165,7 +165,6 @@ docker exec -it burst-detection-lab-worker /usr/local/bin/cusum-detector \
     --mu0      500000 \
     --k        250000 \
     --h-onset  2000000 \
-    --h-drain  2000000 \
     --window   10ms
 
 # Terminal 2 — IF we want to capture per-window byte samples to finte-tune cusum values first
@@ -182,7 +181,8 @@ them by restarting the binary, not by editing the running program):
 | `--mu0` | bytes/window | baseline byte rate per CUSUM window |
 | `--k` | bytes | slack factor — typically half the step you want to detect |
 | `--h-onset` | bytes | threshold on `upper_sum` that triggers onset |
-| `--h-drain` | bytes | threshold on `lower_sum` that triggers drain |
+| `--h-drain` | bytes | static override for the threshold on `lower_sum` that triggers drain (default: derived as `--h-slack-mult × k_drain`; set explicitly only to reproduce pre-derivation runs) |
+| `--h-slack-mult` | dimensionless | drain threshold in slack units, `h_drain = h-slack-mult × k_drain` (default: derived from `h_onset / k`, the onset arm's own operating point) |
 | `--window` | duration | CUSUM window (e.g. `10ms`, `5ms`) |
 | `--sample-windows` | bool | emit per-window byte samples to CSV for parameter tuning (default off) |
 | `--sample-csv` | path | destination for window sample CSV (default: stderr) |

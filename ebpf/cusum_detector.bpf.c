@@ -16,6 +16,10 @@
 //       1 = burst     — running lower CUSUM lower_sum to detect burst drain
 //   - cusum_state holds only the CUSUM accumulators (upper_sum, lower_sum)
 //     and prev_total — no duplicated flag field.
+//   - h_drain is derived at the onset transition as h_slack_mult * k_drain
+//     (both arms expressed in the same "slack units" currency — see
+//     docs/design-decisions-cusum-calibration.md §5-6), unless the static
+//     h_drain override is non-zero, in which case that value wins.
 //   - Onset and drain transitions are emitted to burst_events (RINGBUF) for
 //     userspace logging.
 //   - arm_timer is a SEC("syscall") entry program called once from userspace
@@ -33,15 +37,18 @@
 
 // ---------------------------------------------------------------------------
 // Tunable parameters — set at load time via .rodata constant replacement.
-// All values are in bytes (mu_0, k, h_onset, h_drain) or nanoseconds
-// (window_ns).
+// Most values are in bytes (mu_0, k, h_onset, h_drain) or nanoseconds
+// (window_ns); h_slack_mult is dimensionless (a threshold expressed in
+// slack units, applied to the drain arm — see docs/design-decisions-
+// cusum-calibration.md §5-6).
 // ---------------------------------------------------------------------------
 
-volatile const __u64 mu_0      = 1000000;  // baseline bytes per window
-volatile const __u64 k         = 500000;   // slack factor (half the expected step)
-volatile const __u64 h_onset   = 5000000;  // onset threshold
-volatile const __u64 h_drain   = 5000000;  // drain threshold
-volatile const __u64 window_ns = 100000000; // 100 ms default window
+volatile const __u64 mu_0          = 1000000;  // baseline bytes per window
+volatile const __u64 k             = 500000;   // slack factor (half the expected step)
+volatile const __u64 h_onset       = 5000000;  // onset threshold
+volatile const __u64 h_drain       = 0;        // static drain threshold override; 0 = derive from h_slack_mult * k_drain
+volatile const __u64 h_slack_mult  = 6;       // drain threshold in slack units (h_drain = h_slack_mult * k_drain); loader always injects a computed value in practice
+volatile const __u64 window_ns     = 100000000; // 100 ms default window
 volatile const __u8  sample_windows = 0;  // 1 = emit per-window byte sample for offline CUSUM tuning
 
 // ---------------------------------------------------------------------------
@@ -74,6 +81,7 @@ struct cusum_state_t {
 	__u64 prev_total;   // total bytes at end of previous window
 	__u64 mu_burst;     // burst-level estimate; seeded at onset, used as drain reference
 	__u64 k_drain;      // drain slack; computed at onset = (mu_burst - mu_0) / 2 (design-decisions §4)
+	__u64 h_drain;      // per-burst effective drain threshold; computed at onset = h_drain (static) or h_slack_mult * k_drain (design-decisions §5-6)
 };
 
 struct timer_val {
@@ -232,6 +240,9 @@ static int cusum_tick(void *map, int *key, struct timer_val *val)
 			st->lower_sum = 0;
 			st->mu_burst =  delta;
 			st->k_drain  = (delta > mu_0) ? (delta - mu_0) / 2 : 0;
+			// h_drain (the static override) wins if set; otherwise derive the
+			// drain threshold in the same slack-unit currency as h_onset.
+			st->h_drain  = h_drain ? h_drain : h_slack_mult * st->k_drain;
 		}
 	} else {
 		// Lower CUSUM, detecting burst drain.
@@ -239,13 +250,14 @@ static int cusum_tick(void *map, int *key, struct timer_val *val)
 		st->lower_sum += (__s64)st->mu_burst - (__s64)st->k_drain - (__s64)delta;
 		if (st->lower_sum < 0)
 			st->lower_sum = 0;
-		if (st->lower_sum >= h_drain) {
+		if (st->lower_sum >= (__s64)st->h_drain) {
 			emit_event(EVENT_DRAIN, st->lower_sum, delta);
 			set_burst_flag(0);
 			st->upper_sum = 0;
 			st->lower_sum = 0;
 			st->mu_burst  = 0;
 			st->k_drain   = 0;
+			st->h_drain   = 0;
 		}
 	}
 	return 0;

@@ -22,7 +22,7 @@ type Stats struct {
 type SuggestedParams struct {
 	Mu0 uint64
 	K   uint64
-	H   uint64 // single threshold; caller emits as both --h-onset and --h-drain
+	H   uint64 // onset threshold only; h_drain is derived in-kernel from h_onset/k (see design-decisions-cusum-calibration.md §5-6)
 }
 
 // computeStats computes distribution statistics over a slice of per-window
@@ -108,7 +108,6 @@ func percentile(sorted []float64, p float64) float64 {
 
 // deriveParams maps baseline statistics to CUSUM tuning parameters.
 func deriveParams(s Stats, kMult, hMult float64) SuggestedParams {
-	// TODO(human): implement the mapping from robust stats to CUSUM parameters.
 	return SuggestedParams{
 		Mu0: uint64(s.Median),
 		K:   uint64(kMult * s.SigmaHat),
@@ -131,8 +130,12 @@ func printReport(w io.Writer, s Stats, params SuggestedParams, kMult, hMult floa
 	fmt.Fprintln(w, "Note: values assume the --window size used during capture.")
 	fmt.Fprintln(w, "      Re-capture at a different --window before re-tuning.")
 	fmt.Fprintln(w)
+	fmt.Fprintf(w, "  implied m = h-mult / k-mult = %.2f — the drain threshold is derived\n", hMult/kMult)
+	fmt.Fprintln(w, "  in-kernel from this operating point (h_drain = m × k_drain), not emitted")
+	fmt.Fprintln(w, "  as a flag here. See design-decisions-cusum-calibration.md §5-6.")
+	fmt.Fprintln(w)
 	fmt.Fprintln(w, "=== Suggested flags ===")
 	fmt.Fprintln(w)
-	fmt.Fprintf(w, "  --mu0=%d --k=%d --h-onset=%d --h-drain=%d\n",
-		params.Mu0, params.K, params.H, params.H)
+	fmt.Fprintf(w, "  --mu0=%d --k=%d --h-onset=%d\n",
+		params.Mu0, params.K, params.H)
 }
