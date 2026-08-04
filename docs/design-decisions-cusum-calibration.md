@@ -141,6 +141,18 @@ lower_sum += (mu_burst − k) − delta
 The current snapshot is adequate for initial evaluation; EWMA is the fallback if snapshot-driven
 drain proves unstable on noisy or stepped bursts.
 
+> **Resolved by evaluation — see `docs/conclusions_from_first_experiments.md` §3.** The first
+> window-size sweep measured snapshot-driven drain as unstable: baseline CV is 1.00 at 50 ms, so
+> the single onset sample carries ~±100% error, and the measured Spearman correlation between the
+> onset window's byte count and the resulting drain latency is −0.63 / −0.60 / −0.79. The finding
+> survived recalibration of the 100 ms configuration, confirming it is a design defect rather than
+> a tuning artifact: with corrected parameters, nine bursts of nominally identical amplitude still
+> produced a 2.6× spread in the triggering window, yielding both a premature drain (−53 ms) and a
+> 2.6 s stuck flag within the same run. The
+> fallback is adopted, in **bounded** form (EWMA over the first `n` burst windows, then frozen),
+> which retains the spike-smoothing benefit without the drain-side ramp-chasing contamination
+> that this table's EWMA row warns about.
+
 ---
 
 ### 4. Decision — `k_drain` must be **recomputed at onset**; it is not the same as `k_onset`
@@ -174,11 +186,40 @@ an onset-time-derived value.
 > **return-fraction hysteresis**: declare drain once `delta` stays below
 > `mu_0 + ρ·(mu_burst − mu_0)` for a sustained window count. This is algebraically a
 > `mu_burst`-referenced CUSUM with `k_drain = (1−ρ)(mu_burst − mu_0)`, but exposes `ρ`
-> ("how close to baseline counts as drained") as an explicit knob.
+> ("how close to baseline counts as drained") as an explicit knob. `dwell = m` windows
+> (§5) holds *because* `ρ = 0.5`; in general `dwell = m(1−ρ)/ρ`. If `ρ` is ever exposed,
+> `h_drain` must become `m · (mu_burst − k_drain − mu_0)` to keep `m` meaning "windows".
+
+### Onset arm review — verified against the 30-min baseline, no change needed
+
+The onset arm's own calibration rule (`k_onset = (M−1)·mu_0/2` for a target sensitivity of
+detecting bursts ≥ `M`×baseline, from `docs/experiment-methodology.md` §5) looked, on paper, like
+it could disagree with the noise-based rule actually implemented (`k = 1·σ̂`). Checked against
+`tmp/3.experiments_second_iterations/exp2_finetunning_data_csv/30min_baseline_50ms_windows.csv`
+(n = 36,143 quiescent windows): median 67,074, mean 83,542, `σ̂` 71,810, `σ̂/median` ≈ 1.07. This
+corresponds to a baseline of 1.67 MB/s of pod ingress at 100 req/s (DeathStarBench's fan-out
+amplifies each external request to ~16.7 KB of internal east-west traffic). The burst profile used
+in evaluation adds another 100 req/s, so `Δ ≈ mu_0` and `δ = Δ/σ̂ ≈ 1.0` (a ~2× request-rate
+burst, `M = 2`). The sensitivity-based form gives `k_onset = (M−1)·mu_0/2 = mu_0/2 ≈ 33.5k`; the
+noise-based form gives `k = 0.5·σ̂ ≈ 35.9k` (at `k-mult = 1.0`, `k = σ̂`, i.e. `0.5σ̂` is the slack
+half-width). **The two agree to within 7%** — a consequence of `Δ ≈ mu_0 ≈ σ̂` on this workload,
+not a coincidence to be re-litigated. **No onset-side change needed**; the `k_onset` formula in
+`experiment-methodology.md` §5 and the implemented `k = 1·σ̂` rule are the same rule in different
+units for this specific baseline/burst combination.
+
+The apparent mismatch between onset-triggering window sizes (155k–484k bytes, per
+`docs/conclusions_from_first_experiments.md` §3) and the true burst level (~167k bytes) is
+**selection bias, not miscalibration**: CUSUM can only fire on an upward excursion, and the
+baseline is heavy-tailed (p75 124,397 / p90 184,864 / p99 314,032 / max 586,367 on the same
+50 ms capture). **15.9% of pure-baseline windows already exceed 155,100 bytes** — the smallest
+window that ever triggered onset in the first experiments — so onset-triggering windows are, by
+construction, drawn from the upper tail of the baseline distribution rather than reflecting the
+true burst mean. This is the source of the `a ≈ 2.68` overestimate discussed in §5-6 below, and it
+is a property of tail-triggered sampling, not a defect in `mu_burst = delta` itself.
 
 ---
 
-### 5. Decision — `h_drain` is **left fixed** (not adapted per burst) for now
+### 5. Decision — `h_drain = m · k_drain`, computed at onset (IMPLEMENTED)
 
 **Rationale.** `h` (the decision threshold) trades **detection delay against false-alarm rate**,
 and that trade-off is governed by the signal's *noise*, not its mean — a different quantity from
@@ -201,11 +242,101 @@ directly against Layer 1's "measure and detect only / identity-free" mandate (`C
 §6.5). The high-value correctness fix is `k_drain` (§4); adapting `h_drain` is a second-order
 refinement.
 
-**Decision:** keep `h_drain` a fixed `volatile const` (calibrated to baseline noise). Accept
-that drain *latency* varies with burst magnitude and document it. Revisit only if a scenario
-demonstrates that fixed-`h_drain` drain behavior (either sluggish drain on marginal bursts or
-false drains on noisy bursts) is a measured problem — at which point burst-variance
-normalization becomes justified.
+**Original decision (superseded by evaluation):** keep `h_drain` a fixed `volatile const`
+(calibrated to baseline noise). This was the initial engineering call — the paragraph above
+motivated it, on the grounds that a correct fix would require an online burst-variance estimate.
+It held only until evaluation, below, showed the fix is cheaper than that.
+
+> **SUPERSEDED by evaluation — see `docs/conclusions_from_first_experiments.md` §2.** The
+> revisit condition stated above has been met: the first window-size sweep measured *both*
+> failure modes predicted in this section — false drains on noisy bursts (3 of 9 bursts
+> fragmented at 50 ms, with premature drains 308 ms and 83 ms before burst end) and sluggish
+> drain on a marginal burst (`burst_flag` stuck for 9.3 s at 100 ms). The mechanism is the ratio
+> `h_drain / k_drain`, which is the flag's minimum dwell time in windows; it is currently an
+> accident of calibration, landing at ≈3 windows in all three configurations (predicted dwell
+> 148 / 318 / 621 ms vs observed minimum 150 / 600 / 600 ms).
+>
+> The finding survived recalibration of the 100 ms configuration. Its corrected run exhibits both
+> failure modes within nine bursts — i=1 drained 53 ms *before* its burst ended, i=7 held the flag
+> for 2600 ms (2.6× burst duration) — from a 2.1× spread in the onset window alone.
+
+**IMPLEMENTED decision:** `h_drain = m · k_drain`, computed in-kernel at the onset transition
+alongside `k_drain` (`cusum_detector.bpf.c`: `st->h_drain = h_drain ? h_drain : h_slack_mult *
+st->k_drain;`, where the static `h_drain` override is `0` unless explicitly set). `m`
+(`h_slack_mult`) is the explicit hysteresis knob, and drain latency becomes burst-magnitude-
+independent (the `a`-cancels argument below is the reason why).
+
+Note that the engineering objection in the original decision — that adapting `h_drain` requires an
+online burst-variance estimate — does **not** apply to this formulation. `k_drain` is already
+computed in-kernel at onset, so `h_drain = m · k_drain` is one multiply in the same branch: no new
+state, no new verifier surface, no variance estimation. The objection was correct for
+variance-normalized `h_drain`, which remains rejected.
+
+#### `m` is not a drain-specific concept — it is the onset arm's own operating point
+
+Verified from the experiment-1 armed logs (`docs/conclusions_from_first_experiments.md` §1):
+
+```
+  50ms  mu0= 63946  k= 63827  h_onset=382962  h_onset/k=6.000  h_onset/mu0=5.99
+ 100ms  mu0=127230  k= 84530  h_onset=507180  h_onset/k=6.000  h_onset/mu0=3.99
+ 200ms  mu0=284525  k=124291  h_onset=745746  h_onset/k=6.000  h_onset/mu0=2.62
+```
+
+`h_onset/k = 6.000` exactly in every configuration, because calibration used `k-mult = 1.0` and
+`h-mult = 6.0`. So the detector already ran at "threshold = 6 slack-units" on the onset arm; the
+drain arm simply failed to inherit it. Note `h_onset/mu_0` is **not** invariant across window
+sizes — `k` is the correct denominator for `m`, `mu_0` would make `m` window-size-dependent (it
+scales with the window's noise level, not its baseline mean). Both arms therefore unify as
+`h = m·k`, with `m` reading identically on each: the number of windows of sustained
+one-slack-unit drift required to fire. The loader derives `m` as `effective_h_onset /
+effective_k` when `--h-slack-mult` is not passed explicitly, so a different `--h-mult` at
+calibration time propagates to the drain side automatically — no separate drain-side calibration
+step exists anymore.
+
+#### Why `k_drain = Δ/2` is the right reference (reviewed, unchanged)
+
+`mu_burst − k_drain = (mu_burst + mu_0)/2` — the drain increment is literally "likelihood-ratio
+midpoint minus observed", the canonical CUSUM reference for testing "still at μ₁" vs "back at
+μ₀". It is also the only workable choice: referencing the drain to noise instead (`k_drain =
+0.5·σ̂`, mirroring the onset arm) would put the decision level at `mu_burst − 0.5σ̂`, so any small
+dip inside a burst fires drain. Reviewed and kept as-is, including the implicit `ρ = 0.5` (see the
+return-fraction hysteresis note in §4).
+
+#### Consequence for `m`: it is the fragmentation guard, and why the `mu_burst` EWMA (§3 / conclusions §3) stays deferred
+
+Write `mu_burst = mu_0 + aΔ`, so `k_drain = aΔ/2` and the drain reference level is
+`L = mu_0 + aΔ/2`.
+
+- **After return to baseline:** increment = `L − mu_0 = aΔ/2`, windows-to-fire =
+  `m·(aΔ/2)/(aΔ/2) = m`. **`a` cancels exactly** — post-return drain latency is immune to
+  `mu_burst` estimation error, regardless of how noisy the onset-window snapshot is. This is
+  stronger than the original §3 write-up claimed, and it is why deferring the bounded-EWMA
+  `mu_burst` estimator (conclusions §3, action item 2) is safe **for latency**: the EWMA would
+  only reduce variance in `a`, and `a` doesn't matter once the burst has ended.
+- **During the burst:** `delta ≈ mu_0 + Δ` (the sustained burst level), increment =
+  `Δ(a/2 − 1)`, positive whenever `a > 2`. Windows-to-fire = `m·a/(a−2)`. Measured `a ≈ 2.68`
+  (onset-window median ≈340k bytes vs true sustained burst level ≈167k bytes, on the corrected
+  100 ms configuration) — inflated by the tail-selection-bias effect quantified in §4's onset-arm
+  review (15.9% of baseline windows already exceed the smallest onset-triggering window), not by
+  a byte-vs-request framing error. This gives `m·a/(a−2) ≈ 3.94·m`.
+
+At `m = 6` that is 23.6 windows ≈ **1.18 s** against ~1.05 s bursts — holds with ~12% margin.
+`m = 4` (0.79 s) would fragment. **Decision: keep `m = 6`** as the default, accepting the thin
+mid-burst margin knowingly. `m` (`h_slack_mult`) is a load-time value, so if a future run shows
+residual mid-burst fragmentation, the response is to raise it (e.g. `m = 8` → 1.58 s) via
+`--h-slack-mult`, without a rebuild. The `mu_burst` EWMA stays deferred because it buys only
+mid-burst margin — which a larger `m` buys more cheaply, with one fewer changed variable.
+
+#### Why no degenerate-case floor is needed in-kernel
+
+`k_drain = 0` is unreachable for any `h_onset > 0`: onset only fires when `upper_sum` *crosses*
+`h_onset` (before the update `upper_sum < h_onset`, after it `upper_sum >= h_onset`), so the
+increment `delta − mu_0 − k` was strictly positive and therefore `delta > mu_0 + k >= mu_0`. The
+`(delta > mu_0)` ternary at the onset transition in `cusum_detector.bpf.c` is dead code for any
+valid configuration. The only ways in are misconfiguration — `h_onset == 0`, or `k == 0` with
+`delta == mu_0 + 1` where integer division floors to `0`. Both are rejected at load time in the Go
+loader (`deriveHSlackMult` in `cmd/cusum-detector/loader.go`) rather than defended against on the
+timer path.
 
 ---
 
@@ -216,11 +347,15 @@ normalization becomes justified.
 | `mu_0`, `k`, `h` calibration | **Offline** (`baseline-stats`), baked as `volatile const` | Bootstrap + reproducibility + inspectability; online is a production end-state, not a measurement one. |
 | Online EWMA baseline | **Deferred** | Cannot improve detection speed (structural); confounds controlled experiments. |
 | Drain reference | **`mu_burst`**, not `mu_0` | `mu_0` lower sum detects drop-*below*-baseline, not return-*to*-baseline. |
-| `mu_burst` estimation | **Snapshot at onset** (EWMA as fallback) | Adequate for evaluation; EWMA trades spike-smoothing for drain-side contamination. |
+| `mu_burst` estimation | ~~Snapshot at onset~~ → **bounded EWMA over first `n` burst windows** | Snapshot measured unstable (§3 note); single sample carries ~±100% error at CV = 1.00. |
 | `k_drain` | **Recompute at onset** `= (mu_burst − mu_0)/2` | `k = shift/2`; drain shift is runtime-only. Reusing `k_onset` → drain fires just below the peak → oscillation. **Correctness fix.** |
-| `h_drain` | **Fixed for now** | Correct adaptation needs online burst-variance estimation — fragile, against Layer 1 simplicity. Revisit if scenarios prove need. |
+| `h_drain` | ~~Fixed~~ → **`m · k_drain`**, computed at onset (IMPLEMENTED, `m = 6` default) | Fixed `h_drain` made dwell time an accident of calibration (§5 note); measured as both premature and stuck drains. `m` unifies both arms onto one shared threshold currency, is already the onset arm's operating point (`h_onset/k = 6.000`), and needs no variance estimate. |
 
-**Open question deferred to evaluation:** whether drain *latency* must be uniform across burst
-magnitudes. If yes, `h_drain` must scale with `(mu_burst − mu_0)` (and ideally burst σ); if
-variable drain latency is acceptable given tight onset latency, the fixed-`h_drain` decision in
-§5 stands.
+**Open question — RESOLVED by evaluation.** Whether drain *latency* must be uniform across burst
+magnitudes: **yes.** `docs/conclusions_from_first_experiments.md` §2 measures drain latency
+correlating with burst amplitude at Spearman −0.63 / −0.77 / −0.79, producing both premature
+drains (fragmenting 3 of 9 bursts at 50 ms) and a 9.3 s stuck flag at 100 ms. `h_drain` now
+scales with `(mu_burst − mu_0)` via `k_drain`, computed in-kernel at onset and exposed as the
+`--h-slack-mult` load-time knob (default `m = 6`, derived from `h_onset/k` when not passed
+explicitly). Burst-σ normalization remains rejected — it is not needed to fix this, and the
+fragility objection in §5 still stands against it.
