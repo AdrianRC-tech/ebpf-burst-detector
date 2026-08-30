@@ -22,6 +22,8 @@ import (
 	"time"
 
 	"github.com/cilium/ebpf/ringbuf"
+
+	"github.com/AdrianRC-tech/ebpf-burst-detector/internal/walltime"
 )
 
 func main() {
@@ -195,6 +197,11 @@ func windowOrDefault(p *uint64) any {
 }
 
 func eventLoop(logger *slog.Logger, rd *ringbuf.Reader) error {
+	anchor, anchorErr := walltime.Now()
+	if anchorErr != nil {
+		logger.Warn("failed to capture wall-clock anchor; time_utc/change_point_utc will be empty", "err", anchorErr)
+	}
+
 	for {
 		rec, err := rd.Read()
 		if err != nil {
@@ -207,9 +214,19 @@ func eventLoop(logger *slog.Logger, rd *ringbuf.Reader) error {
 			continue
 		}
 
+		wallStr := ""
+		changeStr := ""
+		if anchorErr == nil {
+			wallStr = anchor.WallClockString(ev.TimestampNs)
+			changeStr = anchor.WallClockString(ev.ChangePointNs)
+		}
+
 		logger.Info("burst_event",
 			"type", eventTypeString(ev.Type),
 			"timestamp_ns", ev.TimestampNs,
+			"time_utc", wallStr,
+			"change_point_utc", changeStr,
+			"lookback", lookbackString(ev),
 			"cusum_value", ev.CusumValue,
 			"window_bytes", ev.WindowBytes,
 		)
