@@ -64,6 +64,7 @@ struct burst_event {
 	__u32 _pad;
 	__u64 cusum_value;   // upper_sum at onset, lower_sum at drain
 	__u64 window_bytes;  // delta bytes in the triggering window
+	__u64 change_point_ns; // estimated ktime of the traffic shift that produced this burst
 };
 
 struct window_sample {
@@ -82,6 +83,7 @@ struct cusum_state_t {
 	__u64 mu_burst;     // burst-level estimate; seeded at onset, used as drain reference
 	__u64 k_drain;      // drain slack; computed at onset = (mu_burst - mu_0) / 2 (design-decisions §4)
 	__u64 h_drain;      // per-burst effective drain threshold; computed at onset = h_drain (static) or h_slack_mult * k_drain (design-decisions §5-6)
+	__u64 accum_start_ns; // ktime of the start of the window in which upper_sum last left zero
 };
 
 struct timer_val {
@@ -157,16 +159,18 @@ static long sum_cb(__u32 cpu, struct sum_ctx *ctx)
 // Helper: emit an event to the ring buffer
 // ---------------------------------------------------------------------------
 
-static __always_inline void emit_event(__u32 type, __u64 cusum_value, __u64 window_bytes)
+static __always_inline void emit_event(__u32 type, __u64 now, __u64 cusum_value,
+                                       __u64 window_bytes, __u64 change_point_ns)
 {
 	struct burst_event *ev = bpf_ringbuf_reserve(&burst_events, sizeof(*ev), 0);
 	if (!ev)
 		return;
-	ev->timestamp_ns = bpf_ktime_get_ns();
-	ev->type         = type;
-	ev->_pad         = 0;
-	ev->cusum_value  = cusum_value;
-	ev->window_bytes = window_bytes;
+	ev->timestamp_ns    = now;
+	ev->type            = type;
+	ev->_pad            = 0;
+	ev->cusum_value     = cusum_value;
+	ev->window_bytes    = window_bytes;
+	ev->change_point_ns = change_point_ns;
 	bpf_ringbuf_submit(ev, 0);
 }
 
@@ -189,6 +193,8 @@ static int cusum_tick(void *map, int *key, struct timer_val *val)
 	// Re-arm immediately so the window is as regular as possible even if
 	// the FSM body is expensive.
 	bpf_timer_start(&val->timer, window_ns, 0);
+
+	__u64 now = bpf_ktime_get_ns();
 
 	// Sum every CPU's slot of node_ingress_bytes.
 	struct sum_ctx sctx = {};
@@ -213,7 +219,7 @@ static int cusum_tick(void *map, int *key, struct timer_val *val)
 	if (sample_windows) {
 		struct window_sample *s = bpf_ringbuf_reserve(&window_samples, sizeof(*s), 0);
 		if (s) {
-			s->timestamp_ns = bpf_ktime_get_ns();
+			s->timestamp_ns = now;
 			s->total        = total;
 			s->delta        = delta;
 			bpf_ringbuf_submit(s, 0);
@@ -228,13 +234,20 @@ static int cusum_tick(void *map, int *key, struct timer_val *val)
 		return 0;
 
 	if (*flag == 0) {
+		// The tick at T covers [T - window_ns, T]. If upper_sum was zero entering
+		// this tick and positive leaving it, the shift began inside that window,
+		// so T - window_ns is the earliest defensible estimate. Re-arms on every
+		// zero window and freezes on first accumulation — no comparison needed.
+		if (st->upper_sum == 0)
+			st->accum_start_ns = now - window_ns;
+
 		// Upper CUSUM, detecting burst onset.
 		// CUSUM+ Formula: upper_sum = max(0, upper_sum + (delta - mu_0 - k))
 		st->upper_sum += (__s64)delta - (__s64)mu_0 - (__s64)k;
 		if (st->upper_sum < 0)
 			st->upper_sum = 0;
 		if (st->upper_sum >= h_onset) {
-			emit_event(EVENT_ONSET, st->upper_sum, delta);
+			emit_event(EVENT_ONSET, now, st->upper_sum, delta, st->accum_start_ns);
 			set_burst_flag(1);
 			st->upper_sum = 0;
 			st->lower_sum = 0;
@@ -251,7 +264,7 @@ static int cusum_tick(void *map, int *key, struct timer_val *val)
 		if (st->lower_sum < 0)
 			st->lower_sum = 0;
 		if (st->lower_sum >= (__s64)st->h_drain) {
-			emit_event(EVENT_DRAIN, st->lower_sum, delta);
+			emit_event(EVENT_DRAIN, now, st->lower_sum, delta, st->accum_start_ns);
 			set_burst_flag(0);
 			st->upper_sum = 0;
 			st->lower_sum = 0;

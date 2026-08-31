@@ -14,7 +14,7 @@ import (
 )
 
 // eventLogLoop reads burst_events from rd and writes one CSV row per event to w.
-// Columns: timestamp_ns, type, cusum_value, window_bytes, time_utc.
+// Columns: timestamp_ns, type, cusum_value, window_bytes, time_utc, change_point_utc, lookback.
 // Blocks until rd is closed.
 func eventLogLoop(logger *slog.Logger, w io.Writer, rd *ringbuf.Reader) error {
 	cw := csv.NewWriter(w)
@@ -25,7 +25,7 @@ func eventLogLoop(logger *slog.Logger, w io.Writer, rd *ringbuf.Reader) error {
 		logger.Warn("failed to capture wall-clock anchor; time_utc column will be empty", "err", anchorErr)
 	}
 
-	if err := cw.Write([]string{"timestamp_ns", "type", "cusum_value", "window_bytes", "time_utc"}); err != nil {
+	if err := cw.Write([]string{"timestamp_ns", "type", "cusum_value", "window_bytes", "time_utc", "change_point_utc", "lookback"}); err != nil {
 		return fmt.Errorf("writing event csv header: %w", err)
 	}
 	cw.Flush()
@@ -46,8 +46,10 @@ func eventLogLoop(logger *slog.Logger, w io.Writer, rd *ringbuf.Reader) error {
 		}
 
 		wallStr := ""
+		changeStr := ""
 		if anchorErr == nil {
 			wallStr = anchor.WallClockString(ev.TimestampNs)
+			changeStr = anchor.WallClockString(ev.ChangePointNs)
 		}
 
 		row := []string{
@@ -56,6 +58,8 @@ func eventLogLoop(logger *slog.Logger, w io.Writer, rd *ringbuf.Reader) error {
 			strconv.FormatUint(ev.CusumValue, 10),
 			strconv.FormatUint(ev.WindowBytes, 10),
 			wallStr,
+			changeStr,
+			lookbackString(ev),
 		}
 		if err := cw.Write(row); err != nil {
 			return fmt.Errorf("writing event csv row: %w", err)

@@ -14,13 +14,14 @@ import (
 )
 
 type bpfCusumStateT struct {
-	_         structs.HostLayout
-	UpperSum  int64
-	LowerSum  int64
-	PrevTotal uint64
-	MuBurst   uint64
-	K_drain   uint64
-	H_drain   uint64
+	_            structs.HostLayout
+	UpperSum     int64
+	LowerSum     int64
+	PrevTotal    uint64
+	MuBurst      uint64
+	K_drain      uint64
+	H_drain      uint64
+	AccumStartNs uint64
 }
 
 type bpfTimerVal struct {

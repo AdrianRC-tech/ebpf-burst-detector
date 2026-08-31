@@ -9,12 +9,13 @@ import (
 	"testing"
 )
 
-func makeEventBytes(tsNs uint64, typ uint32, cusumVal, windowBytes uint64) []byte {
+func makeEventBytes(tsNs uint64, typ uint32, cusumVal, windowBytes, changePointNs uint64) []byte {
 	raw := make([]byte, burstEventSize)
 	binary.LittleEndian.PutUint64(raw[0:], tsNs)
 	binary.LittleEndian.PutUint32(raw[8:], typ)
 	binary.LittleEndian.PutUint64(raw[16:], cusumVal)
 	binary.LittleEndian.PutUint64(raw[24:], windowBytes)
+	binary.LittleEndian.PutUint64(raw[32:], changePointNs)
 	return raw
 }
 
@@ -24,23 +25,24 @@ func makeEventBytes(tsNs uint64, typ uint32, cusumVal, windowBytes uint64) []byt
 // column ordering and type string conversion.
 func TestEventLogCSVFormat(t *testing.T) {
 	inputs := []struct {
-		tsNs        uint64
-		typ         uint32
-		cusumVal    uint64
-		windowBytes uint64
-		wantType    string
+		tsNs          uint64
+		typ           uint32
+		cusumVal      uint64
+		windowBytes   uint64
+		changePointNs uint64
+		wantType      string
 	}{
-		{1_000_000_000, EventOnset, 5_000_001, 2_000_000, "onset"},
-		{2_000_000_000, EventDrain, 6_000_000, 1_000_000, "drain"},
+		{1_000_000_000, EventOnset, 5_000_001, 2_000_000, 900_000_000, "onset"},
+		{2_000_000_000, EventDrain, 6_000_000, 1_000_000, 900_000_000, "drain"},
 	}
 
 	var buf bytes.Buffer
 	cw := csv.NewWriter(&buf)
-	_ = cw.Write([]string{"timestamp_ns", "type", "cusum_value", "window_bytes", "time_utc"})
+	_ = cw.Write([]string{"timestamp_ns", "type", "cusum_value", "window_bytes", "time_utc", "change_point_utc", "lookback"})
 	cw.Flush()
 
 	for _, inp := range inputs {
-		raw := makeEventBytes(inp.tsNs, inp.typ, inp.cusumVal, inp.windowBytes)
+		raw := makeEventBytes(inp.tsNs, inp.typ, inp.cusumVal, inp.windowBytes, inp.changePointNs)
 		ev, err := decodeEvent(raw)
 		if err != nil {
 			t.Fatalf("decodeEvent: %v", err)
@@ -51,6 +53,8 @@ func TestEventLogCSVFormat(t *testing.T) {
 			strconv.FormatUint(ev.CusumValue, 10),
 			strconv.FormatUint(ev.WindowBytes, 10),
 			"",
+			"",
+			lookbackString(ev),
 		})
 		cw.Flush()
 	}
