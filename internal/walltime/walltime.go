@@ -28,7 +28,6 @@ const TimeOnlyNanos = "15:04:05.000000000"
 
 // WallClock maps a BPF monotonic-ns timestamp to wall-clock time.
 func (a Anchor) WallClock(monoNs uint64) time.Time {
-	// TODO(human): apply the monotonic delta to the wall anchor and return the wall time
 	return a.wall.Add(time.Duration(int64(monoNs) - a.monoNs))
 }
 
