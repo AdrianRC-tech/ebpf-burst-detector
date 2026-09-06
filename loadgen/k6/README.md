@@ -2,9 +2,23 @@
 
 Generates the HotelReservation mixed workload with **subsecond bursty windows**, which `wrk2` cannot do
 (wrk2 has second granularity, and forking a fresh `wrk` per burst costs ~15 ms before the first byte
-reaches a pod).
+reaches a pod due to cold start of connections, meanwhile k6 offers VUs pre-allocation).
 
 The wrk2 harness (`run-load.sh`, `run-burst-load.sh`) is untouched and still works.
+
+## Files
+
+- `workload-lib.js` — shared code: the seeded HotelReservation request mix (RNG, endpoint
+  weights) and the summary-reporting helpers. No stage-shape logic; imported by every scenario
+  script below:
+  - `bursts.js` — repeated-burst stage shape. Covers scenarios **A** (baseline only, `N_BURSTS=0`),
+    **B**/**C** (bursts spaced `GAP_S` apart, abrupt edges), and **E** (`RAMP_MS>0`, gradual
+    onset/drain instead of abrupt).
+  - `staircase.js` — scenario **D**: an abrupt up/down staircase from below-baseline to the
+    burst-size rate and back.
+
+For executing each scenario, only the tunables
+passed via `-e` to `bursts.js` or `staircase.js` need to be set properly.
 
 ## Install
 
@@ -26,42 +40,56 @@ stack sit between the loader and the kind bridge, smearing exactly the burst edg
 
 ## Usage
 
-```bash
-./run-k6-load.sh [baseline_rate] [bursty_window_rps] [bursty_window_size_ms] [n_bursts] [target]
-```
+Run a scenario directly with `k6 run <file>.js -e VAR=value ...`. You should never need to edit
+the JS — every tunable is exposed as an env var (defaults live in the `envNum(...)` calls at the
+top of each script).
 
 ```bash
-./run-k6-load.sh                          # defaults: 100 rps + 100 rps for 800ms, x10
-./run-k6-load.sh 100 100 800 3            # quick smoke test, 3 bursty windows
-./run-k6-load.sh 100 0 0 0                # baseline only, no bursts
-./run-k6-load.sh 100 100 400 10           # 400 ms windows (see detectability note below)
+# Scenario A — baseline only, 30 min, for false-positive rate
+k6 run bursts.js -e N_BURSTS=0 -e SETTLE_S=1800 -e TAIL_S=0
+
+# Scenario B — bursts well spaced (5s gap)
+k6 run bursts.js -e GAP_S=5 -e BURSTY_WINDOW_SIZE_MS=500
+
+# Scenario C — bursts tightly spaced (1s gap), tests re-arm after a detection
+k6 run bursts.js -e GAP_S=1 -e BURSTY_WINDOW_SIZE_MS=500
+
+# Scenario D — staircase: 50->100->150->200->150->100->50 rps, 500ms per step
+k6 run staircase.js -e STEP_MS=500
+
+# Scenario E — same burst shape as B, but a 7s ramp on onset/drain instead of abrupt edges
+k6 run bursts.js -e GAP_S=5 -e BURSTY_WINDOW_SIZE_MS=500 -e RAMP_MS=7000
 ```
 
-Edit the tunables at the top of `run-k6-load.sh`; they are passed to `mixed-workload.js` as `-e` flags.
-You should never need to edit the JS.
+### `bursts.js` tunables (scenarios A/B/C/E)
 
 | Tunable | Default | Meaning |
 |---|---|---|
 | `TARGET` | `http://172.18.0.2:30500` | frontend NodePort on the kind bridge |
 | `BASELINE_RATE` | 100 | steady-state rps |
 | `BURSTY_WINDOW_RPS` | 100 | **additive** rps during a window; peak = baseline + this |
-| `BURSTY_WINDOW_SIZE_MS` | 800 | window duration |
-| `N_BURSTS` | 10 | windows per run; 0 = baseline only |
-| `GAP_S` | 10 | baseline seconds between windows |
+| `BURSTY_WINDOW_SIZE_MS` | 800 | window duration (hold-at-peak; excludes ramp) |
+| `RAMP_MS` | 0 | onset/drain transition duration; `0` = abrupt (A/B/C), `>0` = gradual (E) |
+| `N_BURSTS` | 10 | windows per run; 0 = baseline only (A) |
+| `GAP_S` | 10 | baseline seconds between windows — 5 for B, 1 for C |
 | `SETTLE_S` | 100 | baseline lead-in; excluded from analysis |
 | `TAIL_S` | 30 | baseline after the last window |
 | `PRE_ALLOC_VUS` / `MAX_VUS` | 20 / 80 | VU pool |
 | `SEED` | 1337 | PRNG seed; same seed reproduces the same request stream |
 
-**Never run this and the wrk2 scripts at the same time** — offered rates add, so the app sees a load
-neither harness reports.
+### `staircase.js` tunables (scenario D)
 
-The generator does not police the rate you ask for; checking that the cluster can absorb it is on you.
-Watch `failed` in the summary. HotelReservation's services trip gRPC `too_many_pings` GOAWAY under
-enough concurrency, and the resulting connection churn produces byte-rate artifacts that resemble the
-bursts you are trying to detect — a contaminated run that still looks plausible. It was seen around
-250 rps under wrk2 with 100 connections; k6 needs only ~3 VUs at those rates, so the real threshold
-here is different and unmeasured.
+The staircase shape itself — `[50, 100, 150, 200, 150, 100, 50]` rps — is a hardcoded `LEVELS`
+array in the script, not env-tunable; `STEP_MS` is the only axis meant to vary per run. The
+settle/gap hold rate and `startRate` derive from `LEVELS[0]`, so they move with it if you edit
+the array.
+
+| Tunable | Default | Meaning |
+|---|---|---|
+| `TARGET` | `http://172.18.0.2:30500` | frontend NodePort on the kind bridge |
+| `STEP_MS` | 500 | hold duration per step; transitions are abrupt (0s) |
+| `N_CYCLES` | 1 | how many up/down staircases to run, separated by `GAP_S` |
+| `GAP_S` / `SETTLE_S` / `TAIL_S` / `PRE_ALLOC_VUS` / `MAX_VUS` / `SEED` | same as `bursts.js` | |
 
 ## Output
 
@@ -71,15 +99,15 @@ here is different and unmeasured.
 The end-of-run summary reports per-bursty-window request counts:
 
 ```
-  burst   requests   expected   delta
-  000          159        160    -0.6%
-  004          121        160   -24.4%  !!
+  burst   requests   expected
+  000          159        160
+  004          121        160
   across 10 bursts: mean 156.2  sd 12.4  cv 7.9%  min 121  max 162
 ```
 
-`!!` marks windows more than 5% off expected. This matters: under wrk2, two of ten bursts silently
-delivered 85 requests instead of 115, and those two were exactly the detection misses. If a CUSUM onset
-is missing, check this table before blaming the detector.
+Compare `requests` against `expected` per window. This matters: under wrk2, two of ten bursts
+silently delivered 85 requests instead of 115, and those two were exactly the detection misses. If
+a CUSUM onset is missing, check this table before blaming the detector.
 
 Three numbers in the summary are acceptance gates:
 
@@ -117,5 +145,5 @@ request (endpoint mix), not requests per second.
 | `-R <rate>` | `startRate` and stage `target` |
 | `-d <seconds>` | stage `duration` — accepts `800ms` |
 | `-D exp` | not needed; arrival-rate executors are open-model and immune to coordinated omission |
-| `-s script.lua` | `mixed-workload.js` |
+| `-s script.lua` | `bursts.js` / `staircase.js` |
 | N processes in a bash loop | N bursty windows in one stage list, one process |

@@ -50,3 +50,6 @@ cilium endpoint list -o json | jq '.[].status.networking'
 pkill -f ingress-counter
 pkill -f cusum-detector
 rm -rf /sys/fs/bpf/burst-detector
+
+# Introduce load configuring everything from bash instead of script.
+k6 run --quiet -e TARGET=http://172.18.0.2:30500 -e BASELINE_RATE=100 -e BURSTY_WINDOW_RPS=0   -e BURSTY_WINDOW_SIZE_MS=0 -e N_BURSTS=0 -e GAP_S=0 -e SETTLE_S=180 -e TAIL_S=0   -e PRE_ALLOC_VUS=20 -e MAX_VUS=80 -e SEED=1337   loadgen/k6/mixed-workload.js 2>&1 | grep -E "requests|failed|duration|dropped|vus_max"
