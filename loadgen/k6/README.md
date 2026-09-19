@@ -46,13 +46,14 @@ top of each script).
 
 ```bash
 # Scenario A — baseline only, 30 min, for false-positive rate
-k6 run bursts.js -e N_BURSTS=0 -e SETTLE_S=1800 -e TAIL_S=0
+k6 run bursts.js -e N_BURSTS=0 -e SETTLE_S=1800 -e TAIL_S=0 -e BASELINE_RATE=100
 
 # Scenario B — bursts well spaced (5s gap)
-k6 run bursts.js -e GAP_S=5 -e BURSTY_WINDOW_SIZE_MS=500
+k6 run bursts.js -e GAP_S=5 -e BURSTY_WINDOW_SIZE_MS=500 -e BASELINE_RATE=100
+
 
 # Scenario C — bursts tightly spaced (1s gap), tests re-arm after a detection
-k6 run bursts.js -e GAP_S=1 -e BURSTY_WINDOW_SIZE_MS=500
+k6 run bursts.js -e GAP_S=1 -e BURSTY_WINDOW_SIZE_MS=500 -e BASELINE_RATE=100
 
 # Scenario D — staircase: 50->100->150->200->150->100->50 rps, 500ms per step
 k6 run staircase.js -e STEP_MS=500

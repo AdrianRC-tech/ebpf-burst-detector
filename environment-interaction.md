@@ -33,6 +33,9 @@ kubectl get pods -A \
 # Start ebpf programs with window sampling for CUSUM fine-tunning
 /usr/local/bin/ingress-counter & /usr/local/bin/cusum-detector -window 50ms --sample-windows --sample-csv /tmp/ebpf-burst-detector/offline_baseline_50ms_windows.csv
 
+# Start CUSUM detector with setted params
+/usr/local/bin/ingress-counter & /usr/local/bin/cusum-detector -mu0 168702 -k 70371 -h-onset 422226 -h-slack-mult 6 -window 100ms
+
 # Check registerd networking endpoint at each cilium agent. 
 cilium endpoint list -o json | jq '.[].status.networking'
 
@@ -40,7 +43,7 @@ cilium endpoint list -o json | jq '.[].status.networking'
 ./bin/trace-crosscheck --trace-csv tmp/packet_trace.csv --samples-csv tmp/windows_cusum.csv
 
 # Compute CUSUM stats from baseline rate extraction
-./bin/baseline-stats --samples-csv tmp/<csv_file_with_per_window_info>
+./bin/baseline-stats -drop-warmup 0 -h-mult 6 -k-mult 1 --samples-csv tmp/<csv_file_with_per_window_info>
 
 # Burst on loop
 ./run-burst-load.sh <rate> <seq> <sleep>

@@ -21,7 +21,10 @@
 //     docs/design-decisions-cusum-calibration.md §5-6), unless the static
 //     h_drain override is non-zero, in which case that value wins.
 //   - Onset and drain transitions are emitted to burst_events (RINGBUF) for
-//     userspace logging.
+//     userspace logging, each carrying a change_point_ns backdated to the
+//     start of the window in which the active arm (upper_sum or lower_sum)
+//     last left zero — an estimate of when the shift actually began, rather
+//     than the later tick where the threshold was finally crossed.
 //   - arm_timer is a SEC("syscall") entry program called once from userspace
 //     via Program.Run() to initialise and start the timer.
 //
@@ -83,7 +86,7 @@ struct cusum_state_t {
 	__u64 mu_burst;     // burst-level estimate; seeded at onset, used as drain reference
 	__u64 k_drain;      // drain slack; computed at onset = (mu_burst - mu_0) / 2 (design-decisions §4)
 	__u64 h_drain;      // per-burst effective drain threshold; computed at onset = h_drain (static) or h_slack_mult * k_drain (design-decisions §5-6)
-	__u64 accum_start_ns; // ktime of the start of the window in which upper_sum last left zero
+	__u64 accum_start_ns; // ktime of the start of the window in which the active arm (upper_sum pre-onset, lower_sum during a burst) last left zero
 };
 
 struct timer_val {
@@ -258,6 +261,15 @@ static int cusum_tick(void *map, int *key, struct timer_val *val)
 			st->h_drain  = h_drain ? h_drain : h_slack_mult * st->k_drain;
 		}
 	} else {
+		// Same backdating trick as the onset arm above, mirrored onto
+		// lower_sum: re-arms on every window lower_sum sits at zero (right
+		// after the onset transition zeroes it) and freezes the instant it
+		// starts accumulating drain evidence, so change_point_ns reflects
+		// when the return to baseline actually began rather than the later
+		// tick where h_drain was finally crossed.
+		if (st->lower_sum == 0)
+			st->accum_start_ns = now - window_ns;
+
 		// Lower CUSUM, detecting burst drain.
 		// CUSUM- Formula: lower_sum = max(0, lower_sum + (mu_burst - k_drain - delta))
 		st->lower_sum += (__s64)st->mu_burst - (__s64)st->k_drain - (__s64)delta;
