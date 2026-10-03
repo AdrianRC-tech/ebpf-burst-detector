@@ -11,7 +11,7 @@
 import http from 'k6/http';
 import exec from 'k6/execution';
 import {
-  envNum, pad3, baseK6Options, mulberry32, pickRequest, utcNanos, commonSummaryLines, val,
+  envNum, pad3, baseK6Options, mulberry32, pickRequest, parseMix, utcNanos, commonSummaryLines, val,
 } from './workload-lib.js';
 
 // ── configuration ────────────────────────────────────────────────────────────
@@ -30,6 +30,9 @@ const SEED = envNum('SEED', 1337);
 // 0 = abrupt onset/drain (scenarios A/B/C, unchanged from the original single-scenario script).
 // Scenario E sets this to a few seconds so onset/drain ramp linearly instead of stepping.
 const RAMP_MS = envNum('RAMP_MS', 0);
+// Optional request mix for the burst's added traffic, "search,recommend,user,reserve" fractions
+// summing to 1 (e.g. "0.1,0.1,0.4,0.4"). Unset = burst traffic uses the default mix.
+const BURST_MIX = __ENV.BURST_MIX ? parseMix(__ENV.BURST_MIX) : null;
 
 // Rates are additive so they read like the two-wrk2-process setup, but a k6 stage target is a
 // total offered rate. Convert here, once.
@@ -136,9 +139,18 @@ export default function () {
     console.log(`scenario_start: ${st * 1e6} ns  ${utcNanos(st)} UTC`);
   }
 
-  const req = pickRequest(rng);
+  const phase = phaseAt(elapsed);
+  // Baseline traffic keeps the default mix even during a burst; only the added traffic (its
+  // BURSTY_WINDOW_RPS/PEAK_RATE share of the arrival stream) uses BURST_MIX. No extra rng()
+  // draw when BURST_MIX is unset, so default runs stay identical for a given SEED.
+  let mix;
+  if (BURST_MIX !== null && phase.startsWith('burst_') &&
+      rng() < BURSTY_WINDOW_RPS / PEAK_RATE) {
+    mix = BURST_MIX;
+  }
+  const req = pickRequest(rng, mix);
   http.request(req.method, TARGET + req.path, null, {
-    tags: { phase: phaseAt(elapsed), kind: req.kind },
+    tags: { phase, kind: req.kind },
   });
 }
 
