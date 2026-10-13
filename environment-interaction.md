@@ -22,9 +22,6 @@ docker start $(docker ps -aq --filter "label=io.x-k8s.kind.cluster=burst-detecti
 # Configure kubectl again
 kubectl cluster-info --context kind-burst-detection-lab
 
-# Run single load benchmark
-wrk2/wrk -D exp -t 3 -c 100 -d 2 -L -s benchmark/hotelReservation/wrk2/scripts/hotel-reservation/mixed-workload_type_1.lua http://172.18.0.2:30500 -R 100
-
 # Check from existing pods which are in hostNetwork and which have their own network namespace (own netkit devices). Cilium_health device created by cilium to test connectivity.
 kubectl get pods -A \
   --field-selector spec.nodeName=burst-detection-lab-worker \

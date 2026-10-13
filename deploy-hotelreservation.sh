@@ -3,7 +3,6 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HOTEL_RES_DIR="$(realpath "$SCRIPT_DIR/benchmark/hotelReservation/")"
-WRK2_DIR="$(realpath "$SCRIPT_DIR/wrk2")"
 KIND_CLUSTER="burst-detection-lab"
 IMAGE="${HOTEL_IMAGE:-deathstarbench/hotel-reservation:kind-local}"
 
@@ -24,25 +23,6 @@ if ! luarocks list 2>/dev/null | grep -q "^luasocket"; then
 else
   echo "  [OK] luasocket"
 fi
-
-# ── Phase 2: Build wrk2 ───────────────────────────────────────────────────
-
-# echo "=== Phase 2: Build wrk2 ==="
-
-# if [ ! -f "$WRK2_DIR/wrk" ]; then
-#   echo "Installing wrk2 build dependencies..."
-#   sudo apt-get install -y build-essential libssl-dev
-
-#   if [ ! -f "$WRK2_DIR/deps/luajit/src/Makefile" ]; then
-#     echo "Initializing LuaJIT submodule..."
-#     git -C "$DEATHSTAR_DIR" submodule update --init --recursive
-#   fi
-
-#   echo "Building wrk2..."
-#   make -C "$WRK2_DIR"
-# else
-#   echo "  [OK] wrk2 already built"
-# fi
 
 # ── Phase 3: Build and load application image into kind ───────────────────
 
@@ -100,7 +80,4 @@ echo "  kubectl port-forward svc/frontend 5000:5000
         curl http://<internal-ip-of-any-of-the-nodes>:30500
 "
 echo ""
-echo "Run load test (in a separate terminal after port-forward):"
-echo "  $WRK2_DIR/wrk -D exp -t 2 -c 2 -d 30 -L \\"
-echo "    -s $HOTEL_RES_DIR/wrk2/scripts/hotel-reservation/mixed-workload_type_1.lua \\"
-echo "    http://localhost:5000 -R 100"
+echo "Run load test with k6: see loadgen/k6/README.md"

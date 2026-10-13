@@ -210,7 +210,7 @@ them by restarting the binary, not by editing the running program):
 tuning source for Layer 1** — it captures the exact signal the kernel CUSUM
 consumes, window-aligned and at full resolution. For parameter tuning, run
 with `-window 100ms -sample-windows -sample-csv /tmp/windows.csv`, drive load
-with `wrk2`, then derive `mu_0`/`k`/`h_*` from the captured per-window byte
+with k6 (`loadgen/k6`), then derive `mu_0`/`k`/`h_*` from the captured per-window byte
 deltas.
 
 Output is structured JSON to stderr, one line per arming event plus one line
@@ -331,12 +331,8 @@ docker exec -it burst-detection-lab-worker \
     /usr/local/bin/cusum-detector -window 100ms -sample-windows \
     -sample-csv /tmp/windows.csv
 
-# Terminal 3 — generate load (curl loop, or wrk2 from DeathStarBench)
+# Terminal 3 — generate load (curl, or k6 scripts under loadgen/k6 for sustained load)
 curl http://localhost:5000/
-# or for sustained load:
-# wrk2/wrk -D exp -t 2 -c 2 -d 30 -L -R 100 \
-#     -s DeathStarBench/hotelReservation/wrk2/scripts/hotel-reservation/mixed-workload_type_1.lua \
-#     http://localhost:5000
 ```
 
 Watch `delta_bytes` rows accumulate in `/tmp/windows.csv` — that CSV is the
@@ -379,7 +375,7 @@ cAdvisor housekeeping runs every ~10 s — **~100× coarser than the 100 ms CUSU
 
 ### Deriving `mu_0`
 
-Run a steady `wrk2` load and read off the sustained bytes/sec value for your node:
+Run a steady k6 load (`loadgen/k6/staircase.js`) and read off the sustained bytes/sec value for your node:
 
 ```
 mu_0 [bytes/window] = bytes_per_sec / 10    # 100 ms windows = 10 windows/sec
