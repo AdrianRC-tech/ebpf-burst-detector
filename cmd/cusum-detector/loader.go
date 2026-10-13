@@ -8,10 +8,8 @@ import (
 	"github.com/cilium/ebpf/rlimit"
 )
 
-// bpfPinDir is the BPF filesystem directory that holds maps shared with cusum-detector
-// binary and the ingress-counter binary. Both binaries must agree on this path; the shared
-// node_ingr_bytes map (declared with LIBBPF_PIN_BY_NAME in
-// ebpf/headers/shared_maps.h) is pinned at bpfPinDir/node_ingr_bytes.
+// bpfPinDir is the BPF filesystem directory that holds maps shared the different
+// bpf programs we have.
 const bpfPinDir = "/sys/fs/bpf/burst-detector"
 
 // cusumParams holds the CUSUM tuning parameters baked into the BPF object's
@@ -38,6 +36,11 @@ type detector struct {
 	// (armed-log parameter reconstruction depends on this being visible,
 	// not just "kernel-default").
 	hSlackMult uint64
+
+	// windowNs is the effective CUSUM window in nanoseconds — either the
+	// caller's explicit override or the C .rodata default read back from
+	// spec.Variables. Used as the default flow-snapshot poll interval.
+	windowNs uint64
 }
 
 // deriveHSlackMult resolves the drain-side threshold multiplier in slack
@@ -149,6 +152,23 @@ func loadCusumDetector(params cusumParams) (*detector, error) {
 		}
 	}
 
+	// effectiveWindowNs mirrors the hSlackMult pattern above: the flag value
+	// when given, else the C .rodata default read back from spec.Variables.
+	// Used by the caller as the default flow-snapshot poll interval (Task 9)
+	// when --snapshot-interval is not passed.
+	effectiveWindowNs := uint64(0)
+	if params.WindowNs != nil {
+		effectiveWindowNs = *params.WindowNs
+	} else {
+		vs, ok := spec.Variables["window_ns"]
+		if !ok {
+			return nil, fmt.Errorf("variable %q not found in BPF object", "window_ns")
+		}
+		if err := vs.Get(&effectiveWindowNs); err != nil {
+			return nil, fmt.Errorf("reading variable %q: %w", "window_ns", err)
+		}
+	}
+
 	// SampleWindows is a bool flag (__u8 in BPF), not a uint64 tunable, so it is
 	// handled separately from the overrides map above.
 	if params.SampleWindows != nil && *params.SampleWindows {
@@ -168,7 +188,7 @@ func loadCusumDetector(params cusumParams) (*detector, error) {
 		return nil, fmt.Errorf("loading and assigning bpf objects: %w", err)
 	}
 
-	return &detector{objs: objs, hSlackMult: *hSlackMult}, nil
+	return &detector{objs: objs, hSlackMult: *hSlackMult, windowNs: effectiveWindowNs}, nil
 }
 
 // seedPrevTotal initialises cusum_state.PrevTotal to the current sum of

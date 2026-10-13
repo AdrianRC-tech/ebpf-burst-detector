@@ -45,10 +45,6 @@ cilium endpoint list -o json | jq '.[].status.networking'
 # Compute CUSUM stats from baseline rate extraction
 ./bin/baseline-stats -drop-warmup 0 -h-mult 6 -k-mult 1 --samples-csv tmp/<csv_file_with_per_window_info>
 
-# Burst on loop
-./run-burst-load.sh <rate> <seq> <sleep>
-./run-burst-load.sh 100 15 10
-
 ## Cleanup bpf maps and programs after run
 pkill -f ingress-counter
 pkill -f cusum-detector
@@ -56,3 +52,9 @@ rm -rf /sys/fs/bpf/burst-detector
 
 # Introduce load configuring everything from bash instead of script.
 k6 run --quiet -e TARGET=http://172.18.0.2:30500 -e BASELINE_RATE=100 -e BURSTY_WINDOW_RPS=0   -e BURSTY_WINDOW_SIZE_MS=0 -e N_BURSTS=0 -e GAP_S=0 -e SETTLE_S=180 -e TAIL_S=0   -e PRE_ALLOC_VUS=20 -e MAX_VUS=80 -e SEED=1337   loadgen/k6/mixed-workload.js 2>&1 | grep -E "requests|failed|duration|dropped|vus_max"
+
+# Introduce load basic conf
+k6 run bursts.js -e N_BURSTS=5 -e GAP_S=5 -e BURSTY_WINDOW_SIZE_MS=800 -e TAIL_S=0 -e BASELINE_RATE=100 -e SETTLE_S=10
+
+# Run whole solution with attribution flow
+usr/local/bin/ingress-counter & /usr/local/bin/cusum-detector -mu0 293374 -k 127714 -h-onset 766284 -h-slack-mult 6 -window 100ms -attribution-out tmp/ebpf-burst-detector/7.characterization_layer/attribution.ndjson

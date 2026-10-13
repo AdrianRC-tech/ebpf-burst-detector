@@ -1,10 +1,8 @@
 // Command cusum-detector is the userspace driver for the two-sided CUSUM
-// burst detector. It loads the CUSUM BPF object (which shares
-// node_ingr_bytes with ingress-counter via LIBBPF_PIN_BY_NAME), seeds
+// burst detector. It loads the CUSUM BPF object, seeds
 // cusum_state.prev_total from the current counter total to avoid a first-tick
-// false onset, arms the kernel bpf_timer, and logs onset/drain events as
-// structured JSON to stderr.
-//
+// false onset, arms the kernel bpf_timer, and logs onset/drain events to a ringbuffer.
+
 // See README.md for build, attach, and operational guidance.
 package main
 
@@ -45,6 +43,11 @@ func run(logger *slog.Logger) error {
 	sampleWindows := flag.Bool("sample-windows", false, "emit per-window byte samples to CSV for CUSUM parameter tuning")
 	sampleCSV := flag.String("sample-csv", "", "path to write window sample CSV (default: stderr)")
 	eventCSV := flag.String("event-csv", "", "path to write onset/drain events as CSV for offline latency analysis (default: slog to stderr)")
+	attributionOut := flag.String("attribution-out", "", "path to write one NDJSON burst attribution record per drain (default: attribution disabled)")
+	ciliumSocket := flag.String("cilium-socket", "/var/run/cilium/cilium.sock", "Cilium agent API socket, used to label attribution flows with service names")
+	ringRetention := flag.Duration("ring-retention", 3*time.Second, "how far back the flow snapshot ring retains history; must cover onset change point to drain, longer bursts are marked truncated")
+	snapshotInterval := flag.Duration("snapshot-interval", 0, "interval between flow snapshots (default: the effective CUSUM window)")
+	topN := flag.Int("top-n", 25, "maximum contributors to include per attribution record")
 	flag.Parse()
 
 	// Build params with only the flags the user explicitly provided.
@@ -118,6 +121,104 @@ func run(logger *slog.Logger) error {
 
 	var wg sync.WaitGroup
 
+	var onEvent func(BurstEvent)
+	if *attributionOut != "" {
+		interval, err := deriveSnapshotInterval(*snapshotInterval, det.windowNs)
+		if err != nil {
+			stop()
+			return fmt.Errorf("deriving snapshot interval: %w", err)
+		}
+		depth := computeRingDepth(*ringRetention, interval)
+		// A burst still undrained when its onset slot is about to leave the ring
+		// is emitted as unpaired, so the watchdog timeout is the ring retention.
+		timeout := *ringRetention
+		if timeout <= 0 {
+			timeout = interval
+		}
+
+		flowReader, err := newBPFFlowStatsReader(det.objs.FlowStats)
+		if err != nil {
+			stop()
+			return fmt.Errorf("creating flow stats reader: %w", err)
+		}
+		ring := newFlowRing(flowReader, depth)
+
+		attrOutF, err := os.Create(*attributionOut)
+		if err != nil {
+			stop()
+			return fmt.Errorf("opening attribution output %q: %w", *attributionOut, err)
+		}
+		defer attrOutF.Close()
+
+		anchor, anchorErr := walltime.Now()
+		if anchorErr != nil {
+			logger.Warn("failed to capture wall-clock anchor; attribution _utc fields will be empty", "err", anchorErr)
+		}
+
+		attrState := &attributionState{
+			ring:      ring,
+			anomalies: newBPFAnomalyReader(det.objs.FlowAnomalies),
+			resolver:  newCiliumResolver(*ciliumSocket, logger),
+			topN:      *topN,
+			writer:    newJSONRecordWriter(attrOutF),
+			anchor:    anchor,
+			anchorErr: anchorErr,
+			logger:    logger,
+			now:       monotonicNowNs,
+		}
+		onEvent = attrState.onEvent
+
+		// Seed the ring immediately so it isn't empty before the first poll tick.
+		if err := ring.poll(monotonicNowNs()); err != nil {
+			logger.Warn("initial flow snapshot failed", "err", err)
+		}
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ticker := time.NewTicker(interval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					if err := ring.poll(monotonicNowNs()); err != nil {
+						logger.Warn("flow snapshot poll failed", "err", err)
+					}
+				}
+			}
+		}()
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			watchdogTick := timeout / 4
+			if watchdogTick <= 0 {
+				watchdogTick = time.Second
+			}
+			ticker := time.NewTicker(watchdogTick)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					attrState.checkWatchdog(timeout)
+				}
+			}
+		}()
+
+		logger.Info("attribution enabled",
+			"out", *attributionOut,
+			"snapshot_interval", interval,
+			"ring_retention", *ringRetention,
+			"ring_depth", depth,
+			"cilium_socket", *ciliumSocket,
+			"top_n", *topN,
+		)
+	}
+
 	if *sampleWindows {
 		var csvOut io.Writer = os.Stderr
 		if *sampleCSV != "" {
@@ -163,9 +264,9 @@ func run(logger *slog.Logger) error {
 		}
 		defer f.Close()
 		logger.Info("logging burst events to CSV", "path", *eventCSV)
-		eventErr = eventLogLoop(logger, f, rd)
+		eventErr = eventLogLoop(logger, f, rd, onEvent)
 	} else {
-		eventErr = eventLoop(logger, rd)
+		eventErr = eventLoop(logger, rd, onEvent)
 	}
 
 	// Cancel context so the srd closer goroutine fires and sampleLoop unblocks.
@@ -196,7 +297,7 @@ func windowOrDefault(p *uint64) any {
 	return time.Duration(*p).String()
 }
 
-func eventLoop(logger *slog.Logger, rd *ringbuf.Reader) error {
+func eventLoop(logger *slog.Logger, rd *ringbuf.Reader, onEvent func(BurstEvent)) error {
 	anchor, anchorErr := walltime.Now()
 	if anchorErr != nil {
 		logger.Warn("failed to capture wall-clock anchor; time_utc/change_point_utc will be empty", "err", anchorErr)
@@ -230,5 +331,9 @@ func eventLoop(logger *slog.Logger, rd *ringbuf.Reader) error {
 			"cusum_value", ev.CusumValue,
 			"window_bytes", ev.WindowBytes,
 		)
+
+		if onEvent != nil {
+			onEvent(ev)
+		}
 	}
 }

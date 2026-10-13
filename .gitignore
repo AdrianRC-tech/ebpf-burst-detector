@@ -448,19 +448,28 @@ docs/*
 !docs/design-decisions-layer1-to-layer2-interface.md
 
 # Burst Detector — generated artifacts
-/bin/
-/ebpf/headers/vmlinux.h
+## BPF objetcs for ingress byte counter and burst detection
 /cmd/ingress-counter/bpf_bpfel.go
 /cmd/ingress-counter/bpf_bpfel.o
 /cmd/ingress-counter/bpf_bpfeb.go
 /cmd/ingress-counter/bpf_bpfeb.o
+/cmd/cusum-detector/bpf_bpfel.go
+/cmd/cusum-detector/bpf_bpfel.o
+/cmd/cusum-detector/bpf_bpfeb.go
+/cmd/cusum-detector/bpf_bpfeb.o
+
+##  BPF objects for flow characterization
+/cmd/ingress-counter/flow_bpfel.go
+/cmd/ingress-counter/flow_bpfel.o
+/cmd/ingress-counter/flow_bpfeb.go
+/cmd/ingress-counter/flow_bpfeb.o
 
 # Modified version of hotelReservation - DeathStarBench
 /benchmark/
 
 # eBPF Programs Generated binaries
 bin/
-
+/ebpf/headers/vmlinux.h
 # wrk2 HTTP Benchmarking tool
 wrk2/
 

@@ -158,6 +158,16 @@ Adopt if the benchmark in §9 shows the full-rate cost is unaffordable.
 
 ### 5. Decision — Layer 2 ranks by **excess over per-pod baseline**, not by absolute bytes
 
+> **Superseded 2026-10-11 (attribution v2).** The excess-over-baseline ranking below was dropped
+> from the shipped attribution. Why: 5-tuples are ephemeral and non-stationary under connection
+> pooling — in a real burst (src 10.0.2.176) memcached pool connections swapped load, so a flow's
+> "same key's recent past" gave a per-flow excess (536 931) larger than its source's (226 187) and a
+> ~536 KB flow was hidden by the top-N cap behind a flow with excess ≈ −310 810. Layer 2 now lists
+> **flows ranked by burst-window bytes**
+> labelled with Cilium service identities. Accepted trade-off: it can say who carried the burst,
+> not which service changed most. The analysis below is kept as the historical rationale
+> (it still holds at node/per-pod scale, not per-5-tuple).
+
 **Context.** Interval accuracy and attribution are independent problems, and fixing the first
 does not fix the second. Using the measured baseline (1.36 MB/s) and measured burst increment
 (1.76 MB/s over 1 s):

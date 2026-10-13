@@ -1,29 +1,38 @@
-# eBPF Burst Detector — Layer 1
+# eBPF Burst Detector
 
-This repository implements **Layer 1** of a subsecond, two-sided CUSUM burst
-detector for Kubernetes microservices. Layer 1 is the measurement substrate: a
-BPF program that counts ingress bytes per pod at the **pod-side peer netkit
-device**, plus the userspace loader that observes the resulting per-CPU counter.
+This repository implements a subsecond, two-sided CUSUM burst detector for
+Kubernetes microservices, which not only detects the burst but also adds characterization to it collecting the flows/sources that most contributed to it.
+
+**Layer 1** is the measurement substrate: a BPF program that counts ingress
+bytes per pod at the **pod-side peer netkit device**, plus a timer-triggered
+CUSUM detector that turns the resulting per-CPU counter into onset/drain
+events. **Layer 2** adds a second BPF program on the same netkit peer device
+that counts per-flow (5-tuple) bytes, and a userspace pipeline in
+`cusum-detector` that lists the flows that carried each detected burst, ranked
+by *share of burst bytes* and labelled with Cilium service names — see
+[Burst attribution (Layer 2)](#burst-attribution-layer-2) below.
 
 **Datapath:** Cilium netkit + BPF host-routing (no legacy mode), kernel ≥ 6.8.
 
-**Current iteration: 2.** Both binaries are in place:
+**Current state.** Two binaries are in place:
 
-- `cmd/ingress-counter/` — data-path program that counts ingress bytes per pod
-  at the netkit peer device via `AttachNetkitPeer`; the loader is an
-  event-driven daemon (`RTNLGRP_LINK` netlink) that auto-discovers netkit
-  devices and filters by Kubernetes namespace (iteration 1).
+- `cmd/ingress-counter/` — attaches **two** tcx-ingress BPF programs, chained,
+  to every pod's netkit peer device: `ingress_counter` (Layer 1's node-wide
+  byte counter) and `flow_counter` (Layer 2's per-flow counter). The two are
+  always loaded and attached together as one unit — there is no flag to
+  enable attribution separately, and either both attach or neither does. The
+  loader is an event-driven daemon (`RTNLGRP_LINK` netlink) that
+  auto-discovers netkit devices and filters by Kubernetes namespace.
 - `cmd/cusum-detector/` — timer-triggered two-sided CUSUM detector running
-  entirely in kernel space; reads the shared per-CPU counter every window and
-  emits onset/drain events to userspace via a ring buffer (iteration 2).
+  entirely in kernel space, reading the shared per-CPU counter every window
+  and emitting onset/drain events to userspace via a ring buffer. Optionally
+  (via `--attribution-out`) also polls the per-flow counter map and emits one
+  NDJSON attribution record per burst.
 
-The two binaries share `node_ingr_bytes` automatically through the BPF
-filesystem (`LIBBPF_PIN_BY_NAME` declaration + `PinPath: /sys/fs/bpf/burst-detector`
-on both loaders). Start them in either order — whichever loads first creates
-the pinned map; the other reuses it.
-
-Architectural rationale lives in `CLAUDE.md` and `docs/superpowers/specs/`. This
-README covers how to build, run, and validate both binaries.
+All BPF objects share their maps automatically through the BPF filesystem
+(`LIBBPF_PIN_BY_NAME` declarations + `PinPath: /sys/fs/bpf/burst-detector` on
+every loader). Start processes in either order — whichever loads first
+creates each pinned map; the others reuse it.
 
 ---
 
@@ -37,6 +46,14 @@ README covers how to build, run, and validate both binaries.
 | bpftool | recent | BTF dump for `vmlinux.h` |
 | docker, kind, kubectl, helm, cilium CLI | recent | local Kubernetes test cluster |
 | `linux-headers-$(uname -r)` package | matching kernel | provides libbpf headers for refresh |
+
+**BPF feature minimums** (all comfortably below the netkit floor of 6.8):
+
+| Feature | Minimum kernel | Used by |
+|---|---|---|
+| tcx multi-attach (`bpf_mprog`) | 6.6 | both `ingress_counter` and `flow_counter`, chained on the same netkit peer device |
+| `bpf_skb_load_bytes_relative` | 4.18 | `flow_counter`'s offset-independent header parse |
+| `BPF_MAP_TYPE_LRU_PERCPU_HASH` | 4.10 | the `flow_stats` per-flow counter map |
 
 Verify:
 
@@ -94,8 +111,10 @@ peer devices live.
 
 2. **Pick a node to which we want to attach the programs.** With the Cilium netkit
    datapath, the pod's device (inside its netns) is type `netkit`. The ingress
-   counter attaches a tcx-ingress BPF program to each pod's netkit peer device,
-   requiring a brief `setns()` to enter the pod netns.
+   counter attaches **two** chained tcx-ingress BPF programs to each pod's
+   netkit peer device — `ingress_counter` then `flow_counter`, in that order —
+   requiring a brief `setns()` to enter the pod netns. Both attach or neither
+   does; there is no flag to run one without the other.
 
    ```bash                                       
    kubectl get pods -o wide   # pick a pod we want to specially monitor, note its node
@@ -108,7 +127,7 @@ peer devices live.
   ───────────────────────────    ────────────────────────────────────
   eth0 (netkit peer)    ←peer──→   lxcXXXXXX (netkit primary / host)
   └── BPF attaches here             (peer netns crossing at attach time)
-      (tcx-ingress)
+      (tcx-ingress: ingress_counter -> flow_counter, chained)
 
 3. **Run the binary inside the kind node:**
 
@@ -213,6 +232,91 @@ This unpins the shared map. Both binaries must be stopped first.
 
 ---
 
+## Burst attribution (Layer 2)
+
+Layer 1 says *a burst happened*; attribution says *who carried it*. It lists
+the **flows** (5-tuples) that moved the most bytes between the onset change
+point and drain, each with its **share of the burst's bytes** and the Cilium
+service identity of both endpoints. It deliberately does **not** compute
+excess over a per-flow baseline: under connection pooling (e.g. memcached)
+5-tuples are ephemeral and swap load, so a flow's own recent past is not a
+meaningful reference (see `docs/design-decisions-layer1-to-layer2-interface.md`
+§5). The trade-off: it answers "who carried the burst", not "which service
+changed most".
+
+Attribution needs nothing extra attached — `flow_counter` is already running
+alongside `ingress_counter` on every pod (see above). It's off by default in
+`cusum-detector`; turn it on with `--attribution-out`:
+
+```bash
+docker exec -it burst-detection-lab-worker /usr/local/bin/cusum-detector \
+    --mu0 500000 --k 250000 --h-onset 2000000 --window 100ms \
+    --attribution-out /tmp/attribution.ndjson
+```
+
+One NDJSON line is appended to that file per burst, at drain time. Flags:
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--attribution-out` | *(empty — disabled)* | path to the NDJSON output file; attribution only runs when this is set |
+| `--cilium-socket` | `/var/run/cilium/cilium.sock` | Cilium agent API socket used to label flows with service names; must be visible in the node container (same as `ingress-counter`). If unreachable, records omit `src_service`/`dst_service` |
+| `--ring-retention` | `3s` | how far back the in-memory flow-snapshot ring keeps history; must span onset change point → drain, so a longer burst gets `truncated: true` |
+| `--snapshot-interval` | the effective `--window` (floored at 50ms) | how often the flow counter map is polled into the ring |
+| `--top-n` | `25` | max flows listed per record (`flows`/`total_bytes` are never capped, only the list) |
+
+A shorter `--window` (e.g. the 5–25ms windows used in `tmp/6.layer_1_validations`)
+does **not** shrink `--snapshot-interval` below the 50ms floor — the ring's
+memory is `depth × distinct flows`, and `depth = ring-retention / interval`, so
+an unfloored interval at a 5ms window would put the ring in the hundreds of MB
+per node. Deltas use each snapshot's actual counters, never the
+nominal interval, so the floor costs temporal resolution in the ring, not
+correctness. Pass `--snapshot-interval` explicitly if you need finer than 50ms.
+
+### Reading a record
+
+```json
+{
+  "onset_change_point_utc": "12:03:45.100000000", "onset_ts_utc": "12:03:45.600000000",
+  "drain_change_point_utc": "12:03:46.800000000", "drain_ts_utc": "12:03:47.300000000",
+  "total_bytes": 820000, "flows": 4,
+  "truncated": false, "unpaired": false, "evicted_flows": 0,
+  "parse_anomaly_delta": 0, "lru_saturated_delta": 0,
+  "contributors": [
+    {"src": "10.0.1.42:41234", "dst": "10.0.2.9:11211", "proto": "tcp",
+     "src_service": "default/search", "dst_service": "default/memcached-rate",
+     "bytes": 600000, "skbs": 410, "bytes_per_skb": 1463.4},
+    {"src": "10.0.1.7:50112", "dst": "10.0.2.9:11211", "proto": "tcp",
+     "src_service": "default/frontend", "dst_service": "default/memcached-rate",
+     "bytes": 220000, "skbs": 180, "bytes_per_skb": 1222.2}
+  ]
+}
+```
+
+- **`contributors`** has one entry per flow, ranked by `bytes` descending
+  (ties: skbs, then src, dst), capped at `--top-n`. A flow's share of the burst is
+  `bytes / total_bytes`; the listed bytes sum to less than `total_bytes` when
+  the cap hides flows.
+- **`src_service` / `dst_service`** are `<namespace>/<workload>` (workload from
+  `app.kubernetes.io/name`, `app`, `io.kompose.service` or `k8s-app`), or a
+  reserved name (`host`, `remote-node`, `world`, `kube-apiserver`, ...), taken
+  from the Cilium agent's ipcache (`/v1/ip`) joined with `/v1/identity`, so
+  remote pods resolve too. Cached ~10s; only the listed flows are looked up.
+- **`truncated: true`** means the onset's change point was older than the
+  ring's oldest retained slot — the record still uses the oldest slot it has
+  rather than being dropped, but treat its numbers as a lower bound.
+- **`unpaired: true`** means a burst did not drain within `--ring-retention` (measured from the onset change point, i.e. before its onset slot leaves the ring);
+  the record is a partial, best-effort snapshot, not a complete burst window.
+- **`lru_saturated_delta`** reads 0 under ordinary connection churn even if
+  the 8192-entry flow table is thrashing — an LRU map evicts rather than
+  fails on insert. `evicted_flows` (count of flows present at onset but gone
+  by drain) is the more useful churn signal; treat a nonzero
+  `lru_saturated_delta` as a sign of deeper trouble (e.g. per-CPU free-list
+  exhaustion), not the absence of one as "no thrashing".
+- Sources are **raw IPs** in this iteration — naming them (pod/workload) is a
+  later increment (spec §6, not yet built); see `CLAUDE.md`'s Phase 2 note.
+
+---
+
 ## Execute end-to-end load with the HotelReservation workload
 
 While `ingress-counter` runs as a silent attach daemon, drive traffic and
@@ -291,14 +395,24 @@ Pass to `--mu0` when launching `cusum-detector`.
 go test ./...
 ```
 
-This runs the unit tests for `activeCPUs` plus the `BPF_PROG_TEST_RUN` test
-for the data-path program. The BPF test **skips automatically** when run
-without `CAP_BPF` — that's expected for unprivileged developer runs and CI.
-To actually exercise the BPF program in isolation:
+This runs all pure-Go unit tests across every package (loader helpers, the
+flow-snapshot ring, attribution scoring, the CUSUM event-pairing state
+machine, CSV/NDJSON decoding, ground-truth reconciliation) plus the
+`BPF_PROG_TEST_RUN` tests for both data-path programs. The BPF tests **skip
+automatically** when run without `CAP_BPF` — that's expected for
+unprivileged developer runs and CI. To actually exercise both BPF programs
+in isolation:
 
 ```bash
-sudo go test ./cmd/ingress-counter/
+sudo go test ./cmd/ingress-counter/ -v
 ```
+
+This covers `ingress_counter` (TCX chaining, byte counting) and
+`flow_counter` (per-flow parsing, the map-insert race, the non-first-fragment
+and IPv6-parse-anomaly cases) — seven privileged tests in total. Each loads a
+**fresh, unpinned** copy of the BPF object (`LoadAndAssign` with every map's
+`Pinning` cleared) so tests never depend on run order or a prior pinned
+state at `/sys/fs/bpf/burst-detector`.
 
 ---
 
@@ -338,17 +452,27 @@ git diff           # review the header diff before committing
   user has it; on the host, `sudo` the binary.
 - **netkit multi-attach (`bpf_mprog`) coexistence with Cilium.** Cilium
   manages BPF programs on netkit devices via `bpf_mprog`; `ingress_counter`
-  attaches alongside them at the peer device (kernel ≥ 6.8). To confirm both
-  are present after attach:
+  and `flow_counter` attach alongside them at the peer device (kernel ≥ 6.8).
+  To confirm all three are present after attach:
   ```bash
   docker exec burst-detection-lab-worker bpftool net show dev <netkit-peer>
   ```
-  You should see both Cilium's programs and `ingress_counter` listed under the
-  netkit peer device.
-- **Cluster connectivity breaks after attach.** Shouldn't happen — the
-  program returns `TC_ACT_OK` unconditionally and only writes to a counter.
-  If it does: detach (Ctrl-C the loader), confirm Cilium's programs survive
-  via `bpftool net show`, and check that kernel version is ≥ 6.8 (netkit
+  You should see Cilium's programs, `ingress_counter`, *and* `flow_counter`
+  listed under the netkit peer device, in that chain order.
+- **Confirming the two-program chain is actually running** (not just
+  attached). Both `ingress_counter` and `flow_counter` must show the same
+  `run_cnt` in `bpftop` — if `flow_counter`'s `run_cnt` is 0 or lags
+  `ingress_counter`'s, the chain is broken (most likely `ingress_counter`
+  returning a terminal verdict instead of `TCX_NEXT`, which would silently
+  stop the chain before `flow_counter` ever runs):
+  ```bash
+  docker exec -it burst-detection-lab-worker bpftop
+  ```
+- **Cluster connectivity breaks after attach.** Shouldn't happen — both
+  programs return `TCX_NEXT` unconditionally (letting the chain continue to
+  whatever Cilium itself has attached) and only write to counters. If it
+  does: detach (Ctrl-C the loader), confirm Cilium's programs survive via
+  `bpftool net show`, and check that kernel version is ≥ 6.8 (netkit
   multi-attach requires kernel ≥ 6.8).
 - **VS Code IntelliSense can't find `bpf/bpf_helpers.h`.** Point the C/C++
   extension's `includePath` at `${workspaceFolder}/ebpf/headers` via

@@ -1,7 +1,6 @@
 #include "shared_maps.h"
 #include <bpf/bpf_endian.h>
 
-#define TC_ACT_OK  0
 #define ETH_P_IP   0x0800 /* not in vmlinux.h — defined in <linux/if_ether.h> */
 
 /* Flag to determine per_packet tracing. Off by default; operator sets to 1 via --trace-packets for debug runs only. */
@@ -87,7 +86,7 @@ int ingress_counter(struct __sk_buff *skb)
 	if (bytes)
 		// https://people.computing.clemson.edu/~westall/853/notes/skbuff.pdf - skb->len is the total length of the packet, including headers + payload and covering any possible fragmentation. It does not include skb metadata length.
 		*bytes += skb->len;
-	return TC_ACT_OK;
+	return TCX_NEXT;
 }
 
 char LICENSE[] SEC("license") = "GPL";

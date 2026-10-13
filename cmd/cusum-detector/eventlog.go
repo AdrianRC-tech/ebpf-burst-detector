@@ -16,7 +16,7 @@ import (
 // eventLogLoop reads burst_events from rd and writes one CSV row per event to w.
 // Columns: timestamp_ns, type, cusum_value, window_bytes, time_utc, change_point_utc, lookback.
 // Blocks until rd is closed.
-func eventLogLoop(logger *slog.Logger, w io.Writer, rd *ringbuf.Reader) error {
+func eventLogLoop(logger *slog.Logger, w io.Writer, rd *ringbuf.Reader, onEvent func(BurstEvent)) error {
 	cw := csv.NewWriter(w)
 	defer cw.Flush()
 
@@ -65,5 +65,9 @@ func eventLogLoop(logger *slog.Logger, w io.Writer, rd *ringbuf.Reader) error {
 			return fmt.Errorf("writing event csv row: %w", err)
 		}
 		cw.Flush()
+
+		if onEvent != nil {
+			onEvent(ev)
+		}
 	}
 }
