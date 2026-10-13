@@ -276,8 +276,8 @@ correctness. Pass `--snapshot-interval` explicitly if you need finer than 50ms.
 
 ```json
 {
-  "onset_change_point_utc": "12:03:45.100000000", "onset_ts_utc": "12:03:45.600000000",
-  "drain_change_point_utc": "12:03:46.800000000", "drain_ts_utc": "12:03:47.300000000",
+  "onset_change_point_utc": "12:03:45.100000000",
+  "drain_change_point_utc": "12:03:46.800000000",
   "total_bytes": 820000, "flows": 4,
   "truncated": false, "unpaired": false, "evicted_flows": 0,
   "parse_anomaly_delta": 0, "lru_saturated_delta": 0,

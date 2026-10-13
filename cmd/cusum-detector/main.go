@@ -300,7 +300,7 @@ func windowOrDefault(p *uint64) any {
 func eventLoop(logger *slog.Logger, rd *ringbuf.Reader, onEvent func(BurstEvent)) error {
 	anchor, anchorErr := walltime.Now()
 	if anchorErr != nil {
-		logger.Warn("failed to capture wall-clock anchor; time_utc/change_point_utc will be empty", "err", anchorErr)
+		logger.Warn("failed to capture wall-clock anchor; change_point_utc will be empty", "err", anchorErr)
 	}
 
 	for {
@@ -315,19 +315,15 @@ func eventLoop(logger *slog.Logger, rd *ringbuf.Reader, onEvent func(BurstEvent)
 			continue
 		}
 
-		wallStr := ""
 		changeStr := ""
 		if anchorErr == nil {
-			wallStr = anchor.WallClockString(ev.TimestampNs)
 			changeStr = anchor.WallClockString(ev.ChangePointNs)
 		}
 
 		logger.Info("burst_event",
 			"type", eventTypeString(ev.Type),
-			"timestamp_ns", ev.TimestampNs,
-			"time_utc", wallStr,
+			"change_point_ns", ev.ChangePointNs,
 			"change_point_utc", changeStr,
-			"lookback", lookbackString(ev),
 			"cusum_value", ev.CusumValue,
 			"window_bytes", ev.WindowBytes,
 		)

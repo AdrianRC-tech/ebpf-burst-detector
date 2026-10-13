@@ -8,29 +8,24 @@ import (
 // The byte layout under test must match struct burst_event in
 // ebpf/cusum_detector.bpf.c:
 //
-//   timestamp_ns     __u64  offset  0
-//   type             __u32  offset  8
-//   _pad             __u32  offset 12
-//   cusum_value      __u64  offset 16
-//   window_bytes     __u64  offset 24
-//   change_point_ns  __u64  offset 32
+//   type             __u32  offset  0
+//   _pad             __u32  offset  4
+//   cusum_value      __u64  offset  8
+//   window_bytes     __u64  offset 16
+//   change_point_ns  __u64  offset 24
 //                                 ----
-//                                 40 bytes
+//                                 32 bytes
 
 func TestDecodeEvent_Onset(t *testing.T) {
 	raw := make([]byte, burstEventSize)
-	binary.LittleEndian.PutUint64(raw[0:], 1_000_000_000) // 1s
-	binary.LittleEndian.PutUint32(raw[8:], EventOnset)
-	binary.LittleEndian.PutUint64(raw[16:], 5_000_001)
-	binary.LittleEndian.PutUint64(raw[24:], 2_000_000)
-	binary.LittleEndian.PutUint64(raw[32:], 900_000_000) // 1-window lookback
+	binary.LittleEndian.PutUint32(raw[0:], EventOnset)
+	binary.LittleEndian.PutUint64(raw[8:], 5_000_001)
+	binary.LittleEndian.PutUint64(raw[16:], 2_000_000)
+	binary.LittleEndian.PutUint64(raw[24:], 900_000_000)
 
 	ev, err := decodeEvent(raw)
 	if err != nil {
 		t.Fatalf("decodeEvent: %v", err)
-	}
-	if ev.TimestampNs != 1_000_000_000 {
-		t.Errorf("TimestampNs = %d, want 1_000_000_000", ev.TimestampNs)
 	}
 	if ev.Type != EventOnset {
 		t.Errorf("Type = %d, want EventOnset (%d)", ev.Type, EventOnset)
@@ -48,11 +43,10 @@ func TestDecodeEvent_Onset(t *testing.T) {
 
 func TestDecodeEvent_Drain(t *testing.T) {
 	raw := make([]byte, burstEventSize)
-	binary.LittleEndian.PutUint64(raw[0:], 2_000_000_000)
-	binary.LittleEndian.PutUint32(raw[8:], EventDrain)
-	binary.LittleEndian.PutUint64(raw[16:], 6_000_000)
-	binary.LittleEndian.PutUint64(raw[24:], 500_000)
-	binary.LittleEndian.PutUint64(raw[32:], 1_900_000_000)
+	binary.LittleEndian.PutUint32(raw[0:], EventDrain)
+	binary.LittleEndian.PutUint64(raw[8:], 6_000_000)
+	binary.LittleEndian.PutUint64(raw[16:], 500_000)
+	binary.LittleEndian.PutUint64(raw[24:], 1_900_000_000)
 
 	ev, err := decodeEvent(raw)
 	if err != nil {
@@ -69,33 +63,6 @@ func TestDecodeEvent_Drain(t *testing.T) {
 func TestDecodeEvent_TooShort(t *testing.T) {
 	if _, err := decodeEvent(make([]byte, 10)); err == nil {
 		t.Fatal("expected error for short input, got nil")
-	}
-}
-
-func TestDecodeEvent_StaleLayout(t *testing.T) {
-	if _, err := decodeEvent(make([]byte, 32)); err == nil {
-		t.Fatal("expected error for pre-change_point_ns 32-byte layout, got nil")
-	}
-}
-
-func TestLookbackString(t *testing.T) {
-	tests := []struct {
-		name string
-		ev   BurstEvent
-		want string
-	}{
-		{
-			name: "one window lookback",
-			ev:   BurstEvent{TimestampNs: 1_000_000_000, ChangePointNs: 900_000_000},
-			want: "100ms",
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := lookbackString(tt.ev); got != tt.want {
-				t.Errorf("lookbackString(%+v) = %q, want %q", tt.ev, got, tt.want)
-			}
-		})
 	}
 }
 

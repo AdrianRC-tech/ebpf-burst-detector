@@ -106,12 +106,12 @@ func newTestAttributionState(reader flowStatsReader, clock *fakeClock, anomalies
 	}
 }
 
-func onsetEvent(changePointNs, tsNs uint64) BurstEvent {
-	return BurstEvent{Type: EventOnset, ChangePointNs: changePointNs, TimestampNs: tsNs}
+func onsetEvent(changePointNs uint64) BurstEvent {
+	return BurstEvent{Type: EventOnset, ChangePointNs: changePointNs}
 }
 
-func drainEvent(changePointNs, tsNs uint64) BurstEvent {
-	return BurstEvent{Type: EventDrain, ChangePointNs: changePointNs, TimestampNs: tsNs}
+func drainEvent(changePointNs uint64) BurstEvent {
+	return BurstEvent{Type: EventDrain, ChangePointNs: changePointNs}
 }
 
 func TestAttributionStatePairsOnsetAndDrain(t *testing.T) {
@@ -141,12 +141,12 @@ func TestAttributionStatePairsOnsetAndDrain(t *testing.T) {
 		t.Fatalf("onset-time poll: %v", err)
 	}
 
-	s.onEvent(onsetEvent(1_000_000_000, 1_000_000_000))
+	s.onEvent(onsetEvent(1_000_000_000))
 
 	clock.nowNs = 2_000_000_000
 	anomalies.parseAnomaly = 8
 	anomalies.lruSaturated = 3
-	s.onEvent(drainEvent(1_500_000_000, 2_000_000_000))
+	s.onEvent(drainEvent(1_500_000_000))
 
 	if len(writer.records) != 1 {
 		t.Fatalf("len(records) = %d, want 1", len(writer.records))
@@ -203,10 +203,10 @@ func TestAttributionStateEmitFallsBackToOldestSlotAndSetsTruncated(t *testing.T)
 
 	// Onset change point (500) precedes every retained slot (oldest is
 	// 1000): at(500) must fail, forcing the oldest()-slot fallback.
-	s.onEvent(onsetEvent(500, 500))
+	s.onEvent(onsetEvent(500))
 
 	clock.nowNs = 2000
-	s.onEvent(drainEvent(1500, 2000))
+	s.onEvent(drainEvent(1500))
 
 	if len(writer.records) != 1 {
 		t.Fatalf("len(records) = %d, want 1", len(writer.records))
@@ -246,8 +246,8 @@ func TestAttributionStateEmitSerializesWriterAccess(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			p := &pendingOnset{ev: onsetEvent(1000, 1000)}
-			s.emit(p, drainEvent(1000, 1000), 1000, false)
+			p := &pendingOnset{ev: onsetEvent(1000)}
+			s.emit(p, drainEvent(1000), 1000, false)
 		}(i)
 	}
 	wg.Wait()
@@ -268,7 +268,7 @@ func TestAttributionStateDrainWithNoPendingOnsetIsIgnored(t *testing.T) {
 	writer := &fakeRecordWriter{}
 	s := newTestAttributionState(reader, clock, &fakeAnomalyReader{}, writer)
 
-	s.onEvent(drainEvent(1, 1)) // no prior onset
+	s.onEvent(drainEvent(1)) // no prior onset
 
 	if len(writer.records) != 0 {
 		t.Fatalf("len(records) = %d, want 0 (drain with no pending onset)", len(writer.records))
@@ -298,7 +298,7 @@ func TestAttributionStateWatchdogEmitsUnpairedAndIgnoresLateDrain(t *testing.T) 
 		t.Fatalf("onset-time poll: %v", err)
 	}
 
-	s.onEvent(onsetEvent(1_000_000_000, 1_000_000_000))
+	s.onEvent(onsetEvent(1_000_000_000))
 
 	timeout := 500 * time.Millisecond
 	clock.nowNs = 1_000_000_000 + uint64(timeout) // exactly at the timeout: due
@@ -312,7 +312,7 @@ func TestAttributionStateWatchdogEmitsUnpairedAndIgnoresLateDrain(t *testing.T) 
 	}
 
 	// A late real drain for the same (now-cleared) onset must be ignored.
-	s.onEvent(drainEvent(1_100_000_000, 2_000_000_000))
+	s.onEvent(drainEvent(1_100_000_000))
 	if len(writer.records) != 1 {
 		t.Fatalf("len(records) = %d after late drain, want still 1", len(writer.records))
 	}
@@ -331,7 +331,7 @@ func TestAttributionStateWatchdogDoesNothingBeforeTimeout(t *testing.T) {
 	s := newTestAttributionState(reader, clock, &fakeAnomalyReader{}, writer)
 
 	clock.nowNs = 1_000_000_000
-	s.onEvent(onsetEvent(1_000_000_000, 1_000_000_000))
+	s.onEvent(onsetEvent(1_000_000_000))
 
 	timeout := 500 * time.Millisecond
 	clock.nowNs = 1_000_000_000 + uint64(timeout) - 1 // just under the timeout
@@ -365,7 +365,7 @@ func TestAttributionStateEmitLabelsServices(t *testing.T) {
 	if err := s.ring.poll(clock.now()); err != nil {
 		t.Fatalf("seed poll: %v", err)
 	}
-	s.emit(&pendingOnset{ev: onsetEvent(1000, 1000)}, drainEvent(1000, 1000), 1000, false)
+	s.emit(&pendingOnset{ev: onsetEvent(1000)}, drainEvent(1000), 1000, false)
 
 	c := writer.records[0].Contributors[0]
 	if c.SrcService != "default/frontend" || c.DstService != "" {

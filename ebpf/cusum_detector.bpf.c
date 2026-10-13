@@ -62,7 +62,6 @@ volatile const __u8  sample_windows = 0;  // 1 = emit per-window byte sample for
 #define EVENT_DRAIN 1
 
 struct burst_event {
-	__u64 timestamp_ns;
 	__u32 type;          // EVENT_ONSET or EVENT_DRAIN
 	__u32 _pad;
 	__u64 cusum_value;   // upper_sum at onset, lower_sum at drain
@@ -162,13 +161,12 @@ static long sum_cb(__u32 cpu, struct sum_ctx *ctx)
 // Helper: emit an event to the ring buffer
 // ---------------------------------------------------------------------------
 
-static __always_inline void emit_event(__u32 type, __u64 now, __u64 cusum_value,
+static __always_inline void emit_event(__u32 type, __u64 cusum_value,
                                        __u64 window_bytes, __u64 change_point_ns)
 {
 	struct burst_event *ev = bpf_ringbuf_reserve(&burst_events, sizeof(*ev), 0);
 	if (!ev)
 		return;
-	ev->timestamp_ns    = now;
 	ev->type            = type;
 	ev->_pad            = 0;
 	ev->cusum_value     = cusum_value;
@@ -250,7 +248,7 @@ static int cusum_tick(void *map, int *key, struct timer_val *val)
 		if (st->upper_sum < 0)
 			st->upper_sum = 0;
 		if (st->upper_sum >= h_onset) {
-			emit_event(EVENT_ONSET, now, st->upper_sum, delta, st->accum_start_ns);
+			emit_event(EVENT_ONSET, st->upper_sum, delta, st->accum_start_ns);
 			set_burst_flag(1);
 			st->upper_sum = 0;
 			st->lower_sum = 0;
@@ -276,7 +274,7 @@ static int cusum_tick(void *map, int *key, struct timer_val *val)
 		if (st->lower_sum < 0)
 			st->lower_sum = 0;
 		if (st->lower_sum >= (__s64)st->h_drain) {
-			emit_event(EVENT_DRAIN, now, st->lower_sum, delta, st->accum_start_ns);
+			emit_event(EVENT_DRAIN, st->lower_sum, delta, st->accum_start_ns);
 			set_burst_flag(0);
 			st->upper_sum = 0;
 			st->lower_sum = 0;

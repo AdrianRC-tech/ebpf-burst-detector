@@ -23,16 +23,14 @@ import (
 // attributionRecord is one NDJSON record per burst, listing the flows that
 // carried the most burst-window bytes. score fills in the snapshot-derived
 // fields (TotalBytes/Flows/EvictedFlows/Contributors); the
-// event-derived fields (onset/drain change points and firing times as _utc
+// event-derived fields (onset/drain change points as _utc
 // strings, Truncated, Unpaired, and the flow_anomalies deltas) are set by
 // the caller in main.go, which has the BurstEvent pair and the pinned
 // FlowAnomalies map that score has no access to. Service names on the
 // contributors are filled in by emit via the serviceResolver.
 type attributionRecord struct {
 	OnsetChangePointUTC string `json:"onset_change_point_utc,omitempty"`
-	OnsetTsUTC          string `json:"onset_ts_utc,omitempty"`
 	DrainChangePointUTC string `json:"drain_change_point_utc,omitempty"`
-	DrainTsUTC          string `json:"drain_ts_utc,omitempty"`
 
 	// TotalBytes is the burst-window byte sum over every flow (not just the
 	// listed contributors).
@@ -359,7 +357,7 @@ func (s *attributionState) onEvent(ev BurstEvent) {
 
 		if pending == nil {
 			s.logger.Warn("drain event with no pending onset, skipping attribution",
-				"drain_ts_ns", ev.TimestampNs)
+				"drain_change_point_ns", ev.ChangePointNs)
 			return
 		}
 		s.emit(pending, ev, nowNs, false)
@@ -401,7 +399,7 @@ func (s *attributionState) checkWatchdog(timeout time.Duration) {
 	s.mu.Unlock()
 
 	s.logger.Warn("burst onset watchdog: no drain within ring-retention, emitting unpaired record",
-		"onset_ts_ns", pending.ev.TimestampNs, "timeout", timeout)
+		"onset_change_point_ns", pending.ev.ChangePointNs, "timeout", timeout)
 	s.emit(pending, BurstEvent{}, nowNs, true)
 }
 
@@ -436,10 +434,8 @@ func (s *attributionState) emit(pending *pendingOnset, drain BurstEvent, s1Stamp
 
 	if s.anchorErr == nil {
 		rec.OnsetChangePointUTC = s.anchor.WallClockString(pending.ev.ChangePointNs)
-		rec.OnsetTsUTC = s.anchor.WallClockString(pending.ev.TimestampNs)
 		if !unpaired {
 			rec.DrainChangePointUTC = s.anchor.WallClockString(drain.ChangePointNs)
-			rec.DrainTsUTC = s.anchor.WallClockString(drain.TimestampNs)
 		}
 	}
 	rec.Truncated = truncated
