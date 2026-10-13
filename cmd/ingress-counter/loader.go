@@ -373,7 +373,7 @@ func (r *namespaceResolver) refreshErr() error {
 
 // refresh fetches the current endpoint list from the Cilium agent and rebuilds
 // the cache. A full rebuild on every miss is acceptable because refresh is
-// called off the netlink receive hot path (Task 1 serializes all attach work
+// called off the netlink receive hot path (all attach work is serialized
 // through a single worker goroutine), so the O(N)-per-miss cost is bounded.
 func (r *namespaceResolver) refresh() error {
 	resp, err := r.client.Get("http://localhost/v1/endpoint")

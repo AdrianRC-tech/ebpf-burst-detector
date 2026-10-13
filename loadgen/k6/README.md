@@ -4,8 +4,6 @@ Generates the HotelReservation mixed workload with **subsecond bursty windows**,
 (wrk2 has second granularity, and forking a fresh `wrk` per burst costs ~15 ms before the first byte
 reaches a pod due to cold start of connections, meanwhile k6 offers VUs pre-allocation).
 
-The wrk2 harness (`run-load.sh`, `run-burst-load.sh`) is untouched and still works.
-
 ## Files
 
 - `workload-lib.js` — shared code: the seeded HotelReservation request mix (RNG, endpoint

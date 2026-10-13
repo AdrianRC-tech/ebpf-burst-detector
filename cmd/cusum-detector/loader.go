@@ -154,7 +154,7 @@ func loadCusumDetector(params cusumParams) (*detector, error) {
 
 	// effectiveWindowNs mirrors the hSlackMult pattern above: the flag value
 	// when given, else the C .rodata default read back from spec.Variables.
-	// Used by the caller as the default flow-snapshot poll interval (Task 9)
+	// Used by the caller as the default flow-snapshot poll interval
 	// when --snapshot-interval is not passed.
 	effectiveWindowNs := uint64(0)
 	if params.WindowNs != nil {

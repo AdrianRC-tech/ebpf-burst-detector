@@ -49,7 +49,7 @@ int flow_counter(struct __sk_buff *skb)
 		/* first_seen_ns is per-CPU: this insert only initializes the
 		 * calling CPU's value slot, zeroing every other CPU's slot for this
 		 * key (userspace sums across CPUs taking the min non-zero
-		 * first_seen — see flowring.go, Task 7). */
+		 * first_seen — see flowring.go). */
 		struct flow_stat init = {
 			.bytes         = skb->len,
 			.skbs          = 1,

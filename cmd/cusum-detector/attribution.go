@@ -404,8 +404,8 @@ func (s *attributionState) checkWatchdog(timeout time.Duration) {
 }
 
 // emit resolves s0/s1 against the ring, scores the burst, fills in
-// the event/anomaly/flag fields score cannot derive on its own (see the
-// Task 8 ruling on attributionRecord's field split), and writes the record.
+// the event/anomaly/flag fields score cannot derive on its own, and writes
+// the record.
 func (s *attributionState) emit(pending *pendingOnset, drain BurstEvent, s1Stamp uint64, unpaired bool) {
 	t0 := pending.ev.ChangePointNs
 

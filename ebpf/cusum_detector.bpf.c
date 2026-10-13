@@ -197,7 +197,7 @@ static int cusum_tick(void *map, int *key, struct timer_val *val)
 
 	__u64 now = bpf_ktime_get_ns();
 
-	// Sum every CPU's slot of node_ingress_bytes.
+	// Sum every CPU's slot of node_ingr_bytes.
 	struct sum_ctx sctx = {};
 	bpf_loop(MAX_CPUS, sum_cb, &sctx, 0);
 	__u64 total = sctx.total;

@@ -25,7 +25,7 @@ struct {
 } node_ingr_bytes SEC(".maps");
 
 /*
- * Layer 2 (burst attribution) per-flow maps. flow_counter.bpf.c is the only
+ * Layer 2 (burst attribution) per-flow maps. flow_stats.bpf.c is the only
  * writer, but every BPF object that includes this header (ingress_counter,
  * cusum_detector) gets these map definitions compiled in — LIBBPF_PIN_BY_NAME
  * ensures that the same kernel map is used across all objects.
