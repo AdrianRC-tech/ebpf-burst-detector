@@ -76,6 +76,7 @@ k6 run bursts.js -e GAP_S=5 -e BURSTY_WINDOW_SIZE_MS=500 -e RAMP_MS=7000
 | `SETTLE_S` | 100 | baseline lead-in; excluded from analysis |
 | `TAIL_S` | 30 | baseline after the last window |
 | `PRE_ALLOC_VUS` / `MAX_VUS` | 20 / 80 | VU pool |
+| `BURST_MIX` | unset | request mix of the burst's *added* traffic: `search,recommend,user,reserve` fractions, exactly 4 comma-separated values summing to 1 (e.g. `0.1,0.1,0.4,0.4`). Baseline keeps the default 0.6,0.39,0.005,0.005 mix, so during a burst the stream is a blend; unset = no change |
 | `SEED` | 1337 | PRNG seed; same seed reproduces the same request stream |
 
 ### `staircase.js` tunables (scenario D)

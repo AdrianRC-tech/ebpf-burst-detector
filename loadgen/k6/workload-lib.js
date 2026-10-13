@@ -120,13 +120,33 @@ export function reserve(rng) {
   };
 }
 
+// Parse "0.6,0.3,0.05,0.05" (order: search,recommend,user,reserve). Throws on anything but 4
+// non-negative numbers summing to 1, so a bad value aborts in init rather than skewing a run.
+export function parseMix(str) {
+  const parts = str.split(',');
+  const mix = parts.map((p) => (p.trim() === '' ? NaN : Number(p)));
+  if (parts.length !== 4 || mix.some((x) => !Number.isFinite(x) || x < 0)) {
+    throw new Error(`mix "${str}" must be 4 comma-separated non-negative numbers: search,recommend,user,reserve`);
+  }
+  const sum = mix.reduce((a, b) => a + b, 0);
+  if (Math.abs(sum - 1) > 1e-6) {
+    throw new Error(`mix "${str}" sums to ${sum}, must sum to 1`);
+  }
+  return mix;
+}
+
 // Choose one of searchHotel / recommend / userLogin / reserve per call and return its result.
-// The Lua target mix is 60% search, 39% recommend, 0.5% login, 0.5% reserve.
-export function pickRequest(rng) {
-  const SEARCH_RATIO    = 0.6;
-  const RECOMMEND_RATIO = 0.39;
-  const USER_RATIO      = 0.005;
-  // reserve gets the remaining 0.005
+// Without `mix`, the Lua target mix applies: 60% search, 39% recommend, 0.5% login, 0.5% reserve.
+// With `mix` ([search, recommend, user, reserve], as returned by parseMix), those ratios are used.
+export function pickRequest(rng, mix) {
+  let SEARCH_RATIO    = 0.6;
+  let RECOMMEND_RATIO = 0.39;
+  let USER_RATIO      = 0.005;
+  // reserve gets the remainder
+
+  if (mix != null) {
+    [SEARCH_RATIO, RECOMMEND_RATIO, USER_RATIO] = mix;
+  }
 
   const coin = rng();
 

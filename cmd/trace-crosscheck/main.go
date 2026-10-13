@@ -37,9 +37,14 @@ func run(logger *slog.Logger) error {
 	filterProto := flag.Uint("filter-proto", 0, "IP protocol number to include (0 = all)")
 	flag.Parse()
 
-	if *traceCSV == "" || *samplesCSV == "" {
+	if *traceCSV == "" {
 		flag.Usage()
-		return fmt.Errorf("both --trace-csv and --samples-csv are required")
+		return fmt.Errorf("--trace-csv is required")
+	}
+
+	if *samplesCSV == "" {
+		flag.Usage()
+		return fmt.Errorf("--samples-csv is required")
 	}
 
 	windows, err := readWindowSamples(*samplesCSV)

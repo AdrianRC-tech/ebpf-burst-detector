@@ -29,8 +29,17 @@ import (
 const bpfPinDir = "/sys/fs/bpf/burst-detector"
 
 type attachment struct {
-	objs  bpfObjects
-	links map[uint32]link.Link // ifindex → netkit primary link
+	objs     bpfObjects
+	flowObjs flowObjects
+	links    map[uint32]podLinks // ifindex → netkit primary links (counter + flow)
+}
+
+// podLinks holds the two tcx-ingress links attached on one pod's netkit peer
+// device: the byte counter (ingress_counter) and the flow attribution
+// counter (flow_counter), chained in that order.
+type podLinks struct {
+	counter link.Link
+	flow    link.Link
 }
 
 type netkitDev struct {
@@ -501,9 +510,27 @@ func initAttachment(tracePackets bool) (*attachment, error) {
 			objs.Close()
 		}
 	}()
+
+	flowSpec, err := loadFlow()
+	if err != nil {
+		return nil, fmt.Errorf("loading flow bpf collection spec: %w", err)
+	}
+	var flowObjs flowObjects
+	if err := flowSpec.LoadAndAssign(&flowObjs, &ebpf.CollectionOptions{
+		Maps: ebpf.MapOptions{PinPath: bpfPinDir},
+	}); err != nil {
+		return nil, fmt.Errorf("loading flow bpf objects: %w", err)
+	}
+	defer func() {
+		if !ok {
+			flowObjs.Close()
+		}
+	}()
+
 	att := &attachment{
-		objs:  objs,
-		links: make(map[uint32]link.Link),
+		objs:     objs,
+		flowObjs: flowObjs,
+		links:    make(map[uint32]podLinks),
 	}
 	ok = true
 	return att, nil
@@ -575,11 +602,28 @@ func (a *attachment) attachOne(dev netkitDev, resolver nsResolver, allowedNS map
 		return "", fmt.Errorf("enter pod netns: %w", err)
 	}
 
-	l, attachErr := link.AttachTCX(link.TCXOptions{
+	counterLink, attachErr := link.AttachTCX(link.TCXOptions{
 		Interface: int(dev.PeerIfindex),
 		Program:   a.objs.IngressCounter,
 		Attach:    ebpf.AttachTCXIngress,
 	})
+
+	var flowLink link.Link
+	if attachErr == nil {
+		flowLink, attachErr = link.AttachTCX(link.TCXOptions{
+			Interface: int(dev.PeerIfindex),
+			Program:   a.flowObjs.FlowCounter,
+			Attach:    ebpf.AttachTCXIngress,
+			Anchor:    link.AfterLink(counterLink),
+		})
+		if attachErr != nil {
+			// Both programs attach or neither does: tear down the counter
+			// link we just created before falling through to error handling.
+			if closeErr := counterLink.Close(); closeErr != nil {
+				slog.Error("failed to close counter link after flow attach failure", "dev", dev.Name, "err", closeErr)
+			}
+		}
+	}
 
 	if restoreErr := netns.Set(hostNs); restoreErr != nil {
 		// netns restore failed — thread is in unknown state, terminate
@@ -597,7 +641,7 @@ func (a *attachment) attachOne(dev netkitDev, resolver nsResolver, allowedNS map
 		return "", fmt.Errorf("attach tcx-ingress on peer %d (pod %s): %w", dev.PeerIfindex, dev.Name, attachErr)
 	}
 
-	a.links[dev.Ifindex] = l // keyed by host-side primary ifindex, unchanged
+	a.links[dev.Ifindex] = podLinks{counter: counterLink, flow: flowLink} // keyed by host-side primary ifindex, unchanged
 	return reason, nil
 }
 
@@ -608,23 +652,35 @@ func (a *attachment) attachOne(dev netkitDev, resolver nsResolver, allowedNS map
 // staleness). link.Close() returns nil even when the device is already gone,
 // so errors here indicate genuine fd-close failures rather than expected teardown.
 func (a *attachment) detachOne(ifindex uint32) error {
-	l, ok := a.links[ifindex]
+	pl, ok := a.links[ifindex]
 	if !ok {
 		return nil
 	}
-	err := l.Close()
+	var errs []error
+	if err := pl.flow.Close(); err != nil {
+		errs = append(errs, fmt.Errorf("closing flow link: %w", err))
+	}
+	if err := pl.counter.Close(); err != nil {
+		errs = append(errs, fmt.Errorf("closing counter link: %w", err))
+	}
 	delete(a.links, ifindex)
-	return err
+	return errors.Join(errs...)
 }
 
 func (a *attachment) Close() error {
 	var errs []error
-	for ifindex, l := range a.links {
-		if err := l.Close(); err != nil {
-			errs = append(errs, fmt.Errorf("closing netkit link ifindex %d: %w", ifindex, err))
+	for ifindex, pl := range a.links {
+		if err := pl.flow.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("closing flow link ifindex %d: %w", ifindex, err))
+		}
+		if err := pl.counter.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("closing counter link ifindex %d: %w", ifindex, err))
 		}
 	}
 	a.links = nil
+	if err := a.flowObjs.Close(); err != nil {
+		errs = append(errs, fmt.Errorf("closing flow bpf objects: %w", err))
+	}
 	if err := a.objs.Close(); err != nil {
 		errs = append(errs, fmt.Errorf("closing bpf objects: %w", err))
 	}
