@@ -29,8 +29,7 @@ int flow_counter(struct __sk_buff *skb)
 	key.proto = iph.protocol;
 
 	/* Only TCP/UDP carry ports, and only the first fragment has a transport
-	 * header at ihl*4 — a non-first fragment leaves ports at 0, matching the
-	 * ground-truth trace path (ingress_counter.bpf.c's trace_packets branch). */
+	 * header at ihl*4 — a non-first fragment leaves ports at 0. */
 	if ((iph.protocol == IPPROTO_TCP || iph.protocol == IPPROTO_UDP) &&
 	    !(iph.frag_off & bpf_htons(0x1FFF))) {
 		struct {
