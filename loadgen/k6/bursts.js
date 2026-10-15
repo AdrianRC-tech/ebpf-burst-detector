@@ -9,6 +9,7 @@
 // window-size-independent intercept in every onset latency (conclusions from first experiments).
 
 import http from 'k6/http';
+import { check } from 'k6';
 import exec from 'k6/execution';
 import {
   envNum, pad3, baseK6Options, mulberry32, pickRequest, parseMix, utcNanos, commonSummaryLines, val,
@@ -20,12 +21,12 @@ const TARGET = __ENV.TARGET || 'http://172.18.0.2:30500';
 const BASELINE_RATE = envNum('BASELINE_RATE', 100);
 const BURSTY_WINDOW_RPS = envNum('BURSTY_WINDOW_RPS', 100);
 const BURSTY_WINDOW_SIZE_MS = envNum('BURSTY_WINDOW_SIZE_MS', 800);
-const N_BURSTS = envNum('N_BURSTS', 10);
+const N_BURSTS = envNum('N_BURSTS', 5);
 const GAP_S = envNum('GAP_S', 5);
-const SETTLE_S = envNum('SETTLE_S', 100);
+const SETTLE_S = envNum('SETTLE_S', 5);
 const TAIL_S = envNum('TAIL_S', 30);
-const PRE_ALLOC_VUS = envNum('PRE_ALLOC_VUS', 20);
-const MAX_VUS = envNum('MAX_VUS', 80);
+const PRE_ALLOC_VUS = envNum('PRE_ALLOC_VUS', 100);
+const MAX_VUS = envNum('MAX_VUS', 100);
 const SEED = envNum('SEED', 1337);
 // 0 = abrupt onset/drain (scenarios A/B/C, unchanged from the original single-scenario script).
 // Scenario E sets this to a few seconds so onset/drain ramp linearly instead of stepping.
@@ -149,8 +150,12 @@ export default function () {
     mix = BURST_MIX;
   }
   const req = pickRequest(rng, mix);
-  http.request(req.method, TARGET + req.path, null, {
-    tags: { phase, kind: req.kind },
+  const res = http.request(req.method, TARGET + req.path, null, {
+    tags: { phase, kind: req.kind, name: req.kind },
+  });
+
+  check(res, {
+    'status is 200': (r) => r.status === 200,
   });
 }
 

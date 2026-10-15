@@ -21,6 +21,11 @@ export function baseK6Options() {
     discardResponseBodies: true,
     // p(99) is not in k6's default trend set; the capacity probe in docs/experiment-methodology.md
     // gates on it, so ask for it explicitly.
+    // Request URLs carry per-request query params (coordinates, dates, user ids), and k6 tags
+    // every sample with `url` and `name` (defaults to the URL) -> one time series per unique URL,
+    // 100k+ in a run. Drop `url` from the system tags; the scripts set `name` to the request kind.
+    systemTags: ['proto', 'subproto', 'status', 'method', 'error', 'error_code', 'tls_version',
+      'scenario', 'service', 'expected_response', 'check', 'group'],
     summaryTrendStats: ['avg', 'min', 'med', 'p(90)', 'p(95)', 'p(99)', 'max'],
   };
 }
@@ -186,7 +191,7 @@ export function commonSummaryLines(data) {
   out.push('');
   out.push('  requests        ' + val(data, 'http_reqs', 'count') +
     '  (' + val(data, 'http_reqs', 'rate').toFixed(1) + '/s)');
-  out.push('  failed          ' + (val(data, 'http_req_failed', 'rate') * 100).toFixed(2) + '%');
+  out.push('  http_req_failed ' + (val(data, 'http_req_failed', 'rate') * 100).toFixed(2) + '%');
   out.push('  duration        avg ' + val(data, 'http_req_duration', 'avg').toFixed(1) +
     'ms  p95 ' + val(data, 'http_req_duration', 'p(95)').toFixed(1) +
     'ms  p99 ' + val(data, 'http_req_duration', 'p(99)').toFixed(1) + 'ms');
@@ -194,7 +199,16 @@ export function commonSummaryLines(data) {
   // A near-zero avg with a small max means VUs reused warm connections across bursty windows.
   out.push('  connecting      avg ' + val(data, 'http_req_connecting', 'avg').toFixed(2) +
     'ms  max ' + val(data, 'http_req_connecting', 'max').toFixed(2) + 'ms');
+  out.push('  iter duration   avg ' + val(data, 'iteration_duration', 'avg').toFixed(1) +
+    'ms  p95 ' + val(data, 'iteration_duration', 'p(95)').toFixed(1) +
+    'ms  max ' + val(data, 'iteration_duration', 'max').toFixed(1) + 'ms');
+  out.push('  iterations      ' + val(data, 'iterations', 'count'));
   out.push('  dropped_iters   ' + val(data, 'dropped_iterations', 'count'));
-  out.push('  vus_max         ' + val(data, 'vus_max', 'max'));
+  const passes = val(data, 'checks', 'passes');
+  const fails = val(data, 'checks', 'fails');
+  if (passes + fails > 0) {
+    out.push('  checks          ' + ((passes / (passes + fails)) * 100).toFixed(2) +
+      '%  ✓ ' + passes + ' / ✗ ' + fails);
+  }
   return out;
 }

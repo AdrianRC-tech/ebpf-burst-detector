@@ -5,6 +5,7 @@
 // per transition. See CLAUDE.md Testing / the k6 README for the scenario rationale.
 
 import http from 'k6/http';
+import { check } from 'k6';
 import exec from 'k6/execution';
 import {
   envNum, pad3, baseK6Options, mulberry32, pickRequest, utcNanos, commonSummaryLines, val,
@@ -128,8 +129,12 @@ export default function () {
   }
 
   const req = pickRequest(rng);
-  http.request(req.method, TARGET + req.path, null, {
-    tags: { phase: phaseAt(elapsed), kind: req.kind },
+  const res = http.request(req.method, TARGET + req.path, null, {
+    tags: { phase: phaseAt(elapsed), kind: req.kind, name: req.kind },
+  });
+
+  check(res, {
+    'status is 200': (r) => r.status === 200,
   });
 }
 
