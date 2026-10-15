@@ -192,14 +192,16 @@ export function commonSummaryLines(data) {
   out.push('  requests        ' + val(data, 'http_reqs', 'count') +
     '  (' + val(data, 'http_reqs', 'rate').toFixed(1) + '/s)');
   out.push('  http_req_failed ' + (val(data, 'http_req_failed', 'rate') * 100).toFixed(2) + '%');
-  out.push('  duration        avg ' + val(data, 'http_req_duration', 'avg').toFixed(1) +
+  out.push('  http_req_duration  avg ' + val(data, 'http_req_duration', 'avg').toFixed(1) +
     'ms  p95 ' + val(data, 'http_req_duration', 'p(95)').toFixed(1) +
     'ms  p99 ' + val(data, 'http_req_duration', 'p(99)').toFixed(1) + 'ms');
   // Connection setup is the mechanism behind the ~200 ms harness intercept the wrk2 loop suffered.
   // A near-zero avg with a small max means VUs reused warm connections across bursty windows.
   out.push('  connecting      avg ' + val(data, 'http_req_connecting', 'avg').toFixed(2) +
     'ms  max ' + val(data, 'http_req_connecting', 'max').toFixed(2) + 'ms');
-  out.push('  iter duration   avg ' + val(data, 'iteration_duration', 'avg').toFixed(1) +
+  // iteration_duration spans the whole default function (request + checks + any sleep), so it
+  // only tracks http_req_duration closely because each iteration issues one request and no sleep.
+  out.push('  iteration_duration avg ' + val(data, 'iteration_duration', 'avg').toFixed(1) +
     'ms  p95 ' + val(data, 'iteration_duration', 'p(95)').toFixed(1) +
     'ms  max ' + val(data, 'iteration_duration', 'max').toFixed(1) + 'ms');
   out.push('  iterations      ' + val(data, 'iterations', 'count'));
