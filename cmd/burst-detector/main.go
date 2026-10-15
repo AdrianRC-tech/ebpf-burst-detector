@@ -95,6 +95,10 @@ func run(logger *slog.Logger) error {
 	if err := rlimit.RemoveMemlock(); err != nil {
 		return fmt.Errorf("removing memlock rlimit: %w", err)
 	}
+	// Drop pins left by a previous run (e.g. one that was killed) so state starts clean.
+	if err := os.RemoveAll(bpfPinDir); err != nil {
+		return fmt.Errorf("removing stale pin dir %s: %w", bpfPinDir, err)
+	}
 	if err := os.MkdirAll(bpfPinDir, 0o755); err != nil {
 		return fmt.Errorf("creating pin dir %s: %w", bpfPinDir, err)
 	}
@@ -120,7 +124,7 @@ func run(logger *slog.Logger) error {
 
 	// Ordered shutdown: cancel ctx (which also closes the ringbuf readers via
 	// their closer goroutines) → wg.Wait() → output files → att.Close() (links,
-	// flow objs, counter objs) → det.Close(). cancel() and stop() are idempotent.
+	// flow objs, counter objs) → det.Close() → unpin maps. cancel() and stop() are idempotent.
 	defer func() {
 		cancel()
 		stop()
@@ -133,6 +137,9 @@ func run(logger *slog.Logger) error {
 		}
 		if err := det.Close(); err != nil {
 			logger.Error("closing detector", "err", err)
+		}
+		if err := os.RemoveAll(bpfPinDir); err != nil {
+			logger.Error("removing pin dir", "dir", bpfPinDir, "err", err)
 		}
 	}()
 
