@@ -56,7 +56,7 @@ struct {
 
 /* idx 0 = parse_anomaly (unparseable header), idx 1 = lru_saturated
  * (flow_stats insert failed — bpf_map_update_elem returned neither 0 nor
- * -EEXIST). Per-CPU; cusum-detector sums both across CPUs and across
+ * -EEXIST). Per-CPU; burst-detector sums both across CPUs and across
  * snapshot boundaries when building an attribution record.
  *
  * lru_saturated is near-useless as an occupancy signal on its own: an

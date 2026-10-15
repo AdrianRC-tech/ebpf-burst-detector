@@ -8,31 +8,33 @@ bytes per pod at the **pod-side peer netkit device**, plus a timer-triggered
 CUSUM detector that turns the resulting per-CPU counter into onset/drain
 events. **Layer 2** adds a second BPF program on the same netkit peer device
 that counts per-flow (5-tuple) bytes, and a userspace pipeline in
-`cusum-detector` that lists the flows that carried each detected burst, ranked
+`burst-detector` that lists the flows that carried each detected burst, ranked
 by *share of burst bytes* and labelled with Cilium service names — see
 [Burst attribution (Layer 2)](#burst-attribution-layer-2) below.
 
 **Datapath:** Cilium netkit + BPF host-routing (no legacy mode), kernel ≥ 6.8.
 
-**Current state.** Two binaries are in place:
+**Current state.** One daemon, `cmd/burst-detector/`, runs the whole of Layer 1
+(and Layer 2's collection side) with a single flag set and one lifecycle. The
+three BPF objects stay separate (`ebpf/ingress_counter.bpf.c`,
+`ebpf/flow_stats.bpf.c`, `ebpf/cusum_detector.bpf.c`) and share their maps
+through the BPF filesystem (`LIBBPF_PIN_BY_NAME` declarations +
+`PinPath: /sys/fs/bpf/burst-detector`), so downstream layers can read the pinned
+maps too.
 
-- `cmd/ingress-counter/` — attaches **two** tcx-ingress BPF programs, chained,
-  to every pod's netkit peer device: `ingress_counter` (Layer 1's node-wide
-  byte counter) and `flow_counter` (Layer 2's per-flow counter). The two are
-  always loaded and attached together as one unit — there is no flag to
-  enable attribution separately, and either both attach or neither does. The
-  loader is an event-driven daemon (`RTNLGRP_LINK` netlink) that
-  auto-discovers netkit devices and filters by Kubernetes namespace.
-- `cmd/cusum-detector/` — timer-triggered two-sided CUSUM detector running
-  entirely in kernel space, reading the shared per-CPU counter every window
-  and emitting onset/drain events to userspace via a ring buffer. Optionally
-  (via `--attribution-out`) also polls the per-flow counter map and emits one
-  NDJSON attribution record per burst.
+- **Attach path** — attaches **two** tcx-ingress BPF programs, chained, to every
+  pod's netkit peer device: `ingress_counter` (Layer 1's node-wide byte counter)
+  and `flow_counter` (Layer 2's per-flow counter). The two are always loaded and
+  attached together as one unit — either both attach or neither does. It is
+  event-driven (`RTNLGRP_LINK` netlink), auto-discovers netkit devices, and
+  filters by Kubernetes namespace.
+- **Detector** — timer-triggered two-sided CUSUM running entirely in kernel
+  space, reading the shared per-CPU counter every window and emitting
+  onset/drain events to userspace via a ring buffer. Optionally (via
+  `--attribution-out`) also polls the per-flow counter map and emits one NDJSON
+  attribution record per burst.
 
-All BPF objects share their maps automatically through the BPF filesystem
-(`LIBBPF_PIN_BY_NAME` declarations + `PinPath: /sys/fs/bpf/burst-detector` on
-every loader). Start processes in either order — whichever loads first
-creates each pinned map; the others reuse it.
+If either half dies the daemon stops, so the detector never runs on stale maps.
 
 ---
 
@@ -79,23 +81,25 @@ One-off setup (records `bpf2go` as a Go tool dependency in `go.mod`):
 go get -tool github.com/cilium/ebpf/cmd/bpf2go
 ```
 
-Then build both binaries:
+Then build the binary:
 
 ```bash
-go generate ./cmd/ingress-counter/ ./cmd/cusum-detector/
-go build -o bin/ingress-counter  ./cmd/ingress-counter
-go build -o bin/cusum-detector   ./cmd/cusum-detector
+go generate ./cmd/burst-detector/
+go build -o bin/burst-detector ./cmd/burst-detector
 ```
+
+(`./build.sh` does both.)
 
 `go generate` invokes `bpf2go` (cached by Go's tool machinery — rebuilt only
 when the tool version in `go.mod` changes) to compile each BPF C source and
-emit Go bindings at `cmd/*/bpf_bpfel.{go,o}`.
+emit Go bindings at `cmd/burst-detector/{counter,flow,cusum}_bpfel.{go,o}` (one
+prefix per BPF object so the generated identifiers don't collide).
 
 If `ebpf/headers/vmlinux.h` is missing, regenerate it first (see below).
 
 ---
 
-## Run the ingress_counter on the pods of a cluster node
+## Run the burst detector on a cluster node
 
 The cluster is created and Cilium is installed by `cluster-setup.sh`; the
 HotelReservation workload is deployed by `deploy-hotelreservation.sh`. The
@@ -106,12 +110,12 @@ peer devices live.
 1. **Copy the binary into the worker node:**
 
    ```bash
-   docker cp bin/ingress-counter burst-detection-lab-worker:/usr/local/bin/ingress-counter
+   docker cp bin/burst-detector burst-detection-lab-worker:/usr/local/bin/burst-detector
    ```
 
 2. **Pick a node to which we want to attach the programs.** With the Cilium netkit
-   datapath, the pod's device (inside its netns) is type `netkit`. The ingress
-   counter attaches **two** chained tcx-ingress BPF programs to each pod's
+   datapath, the pod's device (inside its netns) is type `netkit`. The daemon
+   attaches **two** chained tcx-ingress BPF programs to each pod's
    netkit peer device — `ingress_counter` then `flow_counter`, in that order —
    requiring a brief `setns()` to enter the pod netns. Both attach or neither
    does; there is no flag to run one without the other.
@@ -133,38 +137,31 @@ peer devices live.
 
    ```bash
    docker exec -it burst-detection-lab-worker \
-       /usr/local/bin/ingress-counter -namespaces default
+       /usr/local/bin/burst-detector -namespaces default -window 100ms
    ```
 
-   Flags:
+   Attach-side flags:
    - `-namespaces` (default `default`): comma-separated allow-list of
      Kubernetes namespaces to attach to. Pods placed in namespaces not provided are skipped automatically.
    - `-cilium-socket` (default `/var/run/cilium/cilium.sock`): path to the
-     Cilium agent unix socket used to resolve pod namespaces.
+     Cilium agent unix socket, used both to resolve pod namespaces and to label
+     attribution flows with service names.
 
    The daemon auto-discovers netkit peer devices via `RTNLGRP_LINK` netlink
-   events and emits a structured JSON log line per attach/detach event, then
-   stays silent until Ctrl-C. Ctrl-C detaches all netkit links cleanly and
-   exits. Byte-per-window analysis is handled by `cusum-detector
-   --sample-windows` — see [Run the CUSUM burst detector](#run-the-cusum-burst-detector-iteration-2).
+   events and emits a structured JSON log line per attach/detach event and per
+   `burst_event`. Ctrl-C (or SIGTERM) detaches all netkit links cleanly and
+   exits. The detector flags are described in
+   [Run the CUSUM burst detector](#run-the-cusum-burst-detector).
 
 ### A note on non-IPv4 packets (IPv6 NDP/MLD)
 
-With `--trace-packets` you will see occasional trace rows with an all-zero tuple and
-`protocol=0`, e.g. `len=70, src_ip=0.0.0.0, dst_ip=0.0.0.0, src_port=0, dst_port=0`. These are
-**non-IPv4 packets**: the data-path program only decodes IPv4 (`skb->protocol == ETH_P_IP`) and
-records just the timestamp and `skb->len` for anything else (`family=0`). On this IPv4-only
-Cilium cluster they are almost always **IPv6 Neighbor Discovery (NDP) / MLD link-local chatter** —
-the kernel brings up an IPv6 link-local address on every interface (including each pod's netkit
-peer) even though IPv6 is disabled at the CNI layer. They are *not* Kubernetes health checks
-(those are IPv4 TCP and decode with a real tuple and `protocol=6`).
-
-> **These bytes are counted on purpose.** `node_ingr_bytes` adds `skb->len` for every packet
-> regardless of L3 protocol, so this IPv6 chatter is included in the CUSUM baseline. That is
-> deliberate: Linux really does deliver these bytes to the pod's interface, so they are genuine
-> ingress and belong in the node-wide byte signal. The volume is tiny (link-local bring-up only)
-> and it does not break `trace-crosscheck` — the packets are still logged with their `len`, so
-> `packet_sum` and `delta_bytes` stay balanced.
+The data-path counter adds `skb->len` for every packet regardless of L3
+protocol, so IPv6 Neighbor Discovery / MLD link-local chatter (the kernel brings
+up an IPv6 link-local address on every interface, including each pod's netkit
+peer, even though IPv6 is disabled at the CNI layer) is included in the CUSUM
+baseline. That is deliberate: Linux really does deliver these bytes to the pod's
+interface, so they are genuine ingress. The volume is tiny (link-local bring-up
+only).
 
 ---
 
@@ -172,23 +169,23 @@ peer) even though IPv6 is disabled at the CNI layer. They are *not* Kubernetes h
 
 ## Run the CUSUM burst detector
 
-The detector loads alongside `ingress-counter` and shares `node_ingr_bytes`
-via the pinned map at `/sys/fs/bpf/burst-detector/node_ingr_bytes`. Copy
-the binary into the kind node and run it inside the same netns as
-`ingress-counter`:
+The detector runs in the same process as the attach path and reads
+`node_ingr_bytes` (also pinned at `/sys/fs/bpf/burst-detector/node_ingr_bytes`
+for downstream readers). Copy the binary into the kind node and run it there:
 
 ```bash
-docker cp bin/cusum-detector burst-detection-lab-worker:/usr/local/bin/cusum-detector
+docker cp bin/burst-detector burst-detection-lab-worker:/usr/local/bin/burst-detector
 
-docker exec -it burst-detection-lab-worker /usr/local/bin/cusum-detector \
+docker exec -it burst-detection-lab-worker /usr/local/bin/burst-detector \
+    --namespaces default \
     --mu0      500000 \
     --k        250000 \
     --h-onset  2000000 \
     --window   10ms
 
-# Terminal 2 — IF we want to capture per-window byte samples to finte-tune cusum values first
+# IF we want to capture per-window byte samples to fine-tune cusum values first
 docker exec -it burst-detection-lab-worker \
-    /usr/local/bin/cusum-detector -window 100ms -sample-windows \
+    /usr/local/bin/burst-detector -window 100ms -sample-windows \
     -sample-csv /tmp/windows.csv
 ```
 
@@ -246,10 +243,10 @@ changed most".
 
 Attribution needs nothing extra attached — `flow_counter` is already running
 alongside `ingress_counter` on every pod (see above). It's off by default in
-`cusum-detector`; turn it on with `--attribution-out`:
+`burst-detector`; turn it on with `--attribution-out`:
 
 ```bash
-docker exec -it burst-detection-lab-worker /usr/local/bin/cusum-detector \
+docker exec -it burst-detection-lab-worker /usr/local/bin/burst-detector \
     --mu0 500000 --k 250000 --h-onset 2000000 --window 100ms \
     --attribution-out /tmp/attribution.ndjson
 ```
@@ -259,7 +256,7 @@ One NDJSON line is appended to that file per burst, at drain time. Flags:
 | Flag | Default | Meaning |
 |---|---|---|
 | `--attribution-out` | *(empty — disabled)* | path to the NDJSON output file; attribution only runs when this is set |
-| `--cilium-socket` | `/var/run/cilium/cilium.sock` | Cilium agent API socket used to label flows with service names; must be visible in the node container (same as `ingress-counter`). If unreachable, records omit `src_service`/`dst_service` |
+| `--cilium-socket` | `/var/run/cilium/cilium.sock` | Cilium agent API socket used to label flows with service names; must be visible in the node container (this is the same flag the attach path uses). If unreachable, records omit `src_service`/`dst_service` |
 | `--ring-retention` | `3s` | how far back the in-memory flow-snapshot ring keeps history; must span onset change point → drain, so a longer burst gets `truncated: true` |
 | `--snapshot-interval` | the effective `--window` (floored at 50ms) | how often the flow counter map is polled into the ring |
 | `--top-n` | `25` | max flows listed per record (`flows`/`total_bytes` are never capped, only the list) |
@@ -319,16 +316,16 @@ correctness. Pass `--snapshot-interval` explicitly if you need finer than 50ms.
 
 ## Execute end-to-end load with the HotelReservation workload
 
-While `ingress-counter` runs as a silent attach daemon, drive traffic and
-capture per-window byte samples via `cusum-detector --sample-windows`.
+While `burst-detector` runs, drive traffic and capture per-window byte samples
+via `--sample-windows`.
 
 ```bash
 # Terminal 1 — port-forward the frontend service
 kubectl port-forward svc/frontend 5000:5000
 
-# Terminal 2 — capture per-window byte samples
+# Terminal 2 — run the daemon capturing per-window byte samples
 docker exec -it burst-detection-lab-worker \
-    /usr/local/bin/cusum-detector -window 100ms -sample-windows \
+    /usr/local/bin/burst-detector -window 100ms -sample-windows \
     -sample-csv /tmp/windows.csv
 
 # Terminal 3 — generate load (curl, or k6 scripts under loadgen/k6 for sustained load)
@@ -381,7 +378,7 @@ Run a steady k6 load (`loadgen/k6/staircase.js`) and read off the sustained byte
 mu_0 [bytes/window] = bytes_per_sec / 10    # 100 ms windows = 10 windows/sec
 ```
 
-Pass to `--mu0` when launching `cusum-detector`.
+Pass to `--mu0` when launching `burst-detector`.
 
 ---
 
@@ -393,19 +390,19 @@ go test ./...
 
 This runs all pure-Go unit tests across every package (loader helpers, the
 flow-snapshot ring, attribution scoring, the CUSUM event-pairing state
-machine, CSV/NDJSON decoding, ground-truth reconciliation) plus the
+machine, CSV/NDJSON decoding) plus the
 `BPF_PROG_TEST_RUN` tests for both data-path programs. The BPF tests **skip
 automatically** when run without `CAP_BPF` — that's expected for
 unprivileged developer runs and CI. To actually exercise both BPF programs
 in isolation:
 
 ```bash
-sudo go test ./cmd/ingress-counter/ -v
+sudo go test ./cmd/burst-detector/ -v
 ```
 
 This covers `ingress_counter` (TCX chaining, byte counting) and
 `flow_counter` (per-flow parsing, the map-insert race, the non-first-fragment
-and IPv6-parse-anomaly cases) — seven privileged tests in total. Each loads a
+and IPv6-parse-anomaly cases) — the privileged `BPF_PROG_TEST_RUN` tests. Each loads a
 **fresh, unpinned** copy of the BPF object (`LoadAndAssign` with every map's
 `Pinning` cleared) so tests never depend on run order or a prior pinned
 state at `/sys/fs/bpf/burst-detector`.
