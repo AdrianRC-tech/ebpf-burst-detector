@@ -15,13 +15,13 @@ func mustPoll(t *testing.T, r *flowRing, stampNs uint64, reader flowStatsReader)
 // sequence of BPF map states without any real BPF.
 type fakeFlowStatsReader struct {
 	calls [][]struct {
-		key       bpfFlowKey
-		cpuValues []bpfFlowStat
+		key       cusumFlowKey
+		cpuValues []cusumFlowStat
 	}
 	i int
 }
 
-func (f *fakeFlowStatsReader) readAll() ([]bpfFlowKey, []bpfFlowStat, int, error) {
+func (f *fakeFlowStatsReader) readAll() ([]cusumFlowKey, []cusumFlowStat, int, error) {
 	if f.i >= len(f.calls) {
 		f.i = len(f.calls) - 1 // repeat the last state if over-polled
 	}
@@ -35,8 +35,8 @@ func (f *fakeFlowStatsReader) readAll() ([]bpfFlowKey, []bpfFlowStat, int, error
 		}
 	}
 
-	keys := make([]bpfFlowKey, len(entries))
-	values := make([]bpfFlowStat, len(entries)*possibleCPU)
+	keys := make([]cusumFlowKey, len(entries))
+	values := make([]cusumFlowStat, len(entries)*possibleCPU)
 	for i, e := range entries {
 		keys[i] = e.key
 		copy(values[i*possibleCPU:(i+1)*possibleCPU], e.cpuValues)
@@ -44,19 +44,19 @@ func (f *fakeFlowStatsReader) readAll() ([]bpfFlowKey, []bpfFlowStat, int, error
 	return keys, values, possibleCPU, nil
 }
 
-func key(srcIP uint32) bpfFlowKey {
-	return bpfFlowKey{SrcIp: srcIP, DstIp: 1, SrcPort: 1, DstPort: 2, Proto: 6}
+func key(srcIP uint32) cusumFlowKey {
+	return cusumFlowKey{SrcIp: srcIP, DstIp: 1, SrcPort: 1, DstPort: 2, Proto: 6}
 }
 
 func TestFlowRingAtReturnsNewestSlotAtOrBeforeT(t *testing.T) {
 	r := newFlowRing(nil, 4)
 	reader := &fakeFlowStatsReader{calls: [][]struct {
-		key       bpfFlowKey
-		cpuValues []bpfFlowStat
+		key       cusumFlowKey
+		cpuValues []cusumFlowStat
 	}{
-		{{key: key(1), cpuValues: []bpfFlowStat{{Bytes: 100, Skbs: 1, FirstSeenNs: 10}}}},
-		{{key: key(1), cpuValues: []bpfFlowStat{{Bytes: 200, Skbs: 2, FirstSeenNs: 10}}}},
-		{{key: key(1), cpuValues: []bpfFlowStat{{Bytes: 300, Skbs: 3, FirstSeenNs: 10}}}},
+		{{key: key(1), cpuValues: []cusumFlowStat{{Bytes: 100, Skbs: 1, FirstSeenNs: 10}}}},
+		{{key: key(1), cpuValues: []cusumFlowStat{{Bytes: 200, Skbs: 2, FirstSeenNs: 10}}}},
+		{{key: key(1), cpuValues: []cusumFlowStat{{Bytes: 300, Skbs: 3, FirstSeenNs: 10}}}},
 	}}
 
 	mustPoll(t, r, 100, reader)
@@ -106,12 +106,12 @@ func TestFlowRingAtReturnsNewestSlotAtOrBeforeT(t *testing.T) {
 // drain-time snapshot onto an older one (spec correction 5's whole point).
 func TestFlowRingKeepsSlotsSortedUnderOutOfOrderPolls(t *testing.T) {
 	r := newFlowRing(&fakeFlowStatsReader{calls: [][]struct {
-		key       bpfFlowKey
-		cpuValues []bpfFlowStat
+		key       cusumFlowKey
+		cpuValues []cusumFlowStat
 	}{
-		{{key: key(1), cpuValues: []bpfFlowStat{{Bytes: 100, Skbs: 1, FirstSeenNs: 1}}}},
-		{{key: key(1), cpuValues: []bpfFlowStat{{Bytes: 201, Skbs: 1, FirstSeenNs: 1}}}},
-		{{key: key(1), cpuValues: []bpfFlowStat{{Bytes: 200, Skbs: 1, FirstSeenNs: 1}}}},
+		{{key: key(1), cpuValues: []cusumFlowStat{{Bytes: 100, Skbs: 1, FirstSeenNs: 1}}}},
+		{{key: key(1), cpuValues: []cusumFlowStat{{Bytes: 201, Skbs: 1, FirstSeenNs: 1}}}},
+		{{key: key(1), cpuValues: []cusumFlowStat{{Bytes: 200, Skbs: 1, FirstSeenNs: 1}}}},
 	}}, 4)
 
 	if err := r.poll(100); err != nil {
@@ -145,12 +145,12 @@ func TestFlowRingKeepsSlotsSortedUnderOutOfOrderPolls(t *testing.T) {
 func TestFlowRingWraparoundDropsOldestSlot(t *testing.T) {
 	r := newFlowRing(nil, 2) // depth 2
 	reader := &fakeFlowStatsReader{calls: [][]struct {
-		key       bpfFlowKey
-		cpuValues []bpfFlowStat
+		key       cusumFlowKey
+		cpuValues []cusumFlowStat
 	}{
-		{{key: key(1), cpuValues: []bpfFlowStat{{Bytes: 100, Skbs: 1, FirstSeenNs: 10}}}},
-		{{key: key(1), cpuValues: []bpfFlowStat{{Bytes: 200, Skbs: 2, FirstSeenNs: 10}}}},
-		{{key: key(1), cpuValues: []bpfFlowStat{{Bytes: 300, Skbs: 3, FirstSeenNs: 10}}}},
+		{{key: key(1), cpuValues: []cusumFlowStat{{Bytes: 100, Skbs: 1, FirstSeenNs: 10}}}},
+		{{key: key(1), cpuValues: []cusumFlowStat{{Bytes: 200, Skbs: 2, FirstSeenNs: 10}}}},
+		{{key: key(1), cpuValues: []cusumFlowStat{{Bytes: 300, Skbs: 3, FirstSeenNs: 10}}}},
 	}}
 
 	mustPoll(t, r, 100, reader) // slot at 100
@@ -173,19 +173,19 @@ func TestFlowRingWraparoundDropsOldestSlot(t *testing.T) {
 func TestSumFlowValueAcrossCPUsTakesMinNonZeroFirstSeen(t *testing.T) {
 	cases := []struct {
 		name   string
-		values []bpfFlowStat
+		values []cusumFlowStat
 		want   flowVal
 	}{
 		{
 			name: "single cpu",
-			values: []bpfFlowStat{
+			values: []cusumFlowStat{
 				{Bytes: 100, Skbs: 1, FirstSeenNs: 500},
 			},
 			want: flowVal{bytes: 100, skbs: 1, firstSeen: 500},
 		},
 		{
 			name: "insert cpu has lower first_seen than a later-contributing cpu",
-			values: []bpfFlowStat{
+			values: []cusumFlowStat{
 				{Bytes: 100, Skbs: 1, FirstSeenNs: 500}, // the CPU that ran BPF_NOEXIST
 				{Bytes: 50, Skbs: 1, FirstSeenNs: 0},    // -EEXIST fallback: bytes added, first_seen stays 0
 			},
@@ -193,7 +193,7 @@ func TestSumFlowValueAcrossCPUsTakesMinNonZeroFirstSeen(t *testing.T) {
 		},
 		{
 			name: "all cpus zero",
-			values: []bpfFlowStat{
+			values: []cusumFlowStat{
 				{Bytes: 0, Skbs: 0, FirstSeenNs: 0},
 				{Bytes: 0, Skbs: 0, FirstSeenNs: 0},
 			},
@@ -201,7 +201,7 @@ func TestSumFlowValueAcrossCPUsTakesMinNonZeroFirstSeen(t *testing.T) {
 		},
 		{
 			name: "min across two nonzero first_seen values",
-			values: []bpfFlowStat{
+			values: []cusumFlowStat{
 				{Bytes: 10, Skbs: 1, FirstSeenNs: 900},
 				{Bytes: 20, Skbs: 1, FirstSeenNs: 300},
 			},
@@ -231,24 +231,24 @@ func TestFlowRingCompactionKeepsLiveValuesIntact(t *testing.T) {
 	r := newFlowRing(nil, 3) // depth 3
 
 	reader := &fakeFlowStatsReader{calls: [][]struct {
-		key       bpfFlowKey
-		cpuValues []bpfFlowStat
+		key       cusumFlowKey
+		cpuValues []cusumFlowStat
 	}{
 		{ // poll @100: keys 1,2,3 all present
-			{key: key(1), cpuValues: []bpfFlowStat{{Bytes: 10, Skbs: 1, FirstSeenNs: 1}}},
-			{key: key(2), cpuValues: []bpfFlowStat{{Bytes: 20, Skbs: 1, FirstSeenNs: 1}}},
-			{key: key(3), cpuValues: []bpfFlowStat{{Bytes: 30, Skbs: 1, FirstSeenNs: 1}}},
+			{key: key(1), cpuValues: []cusumFlowStat{{Bytes: 10, Skbs: 1, FirstSeenNs: 1}}},
+			{key: key(2), cpuValues: []cusumFlowStat{{Bytes: 20, Skbs: 1, FirstSeenNs: 1}}},
+			{key: key(3), cpuValues: []cusumFlowStat{{Bytes: 30, Skbs: 1, FirstSeenNs: 1}}},
 		},
 		{ // poll @200: only key 1 (2,3 evicted from the BPF map / never seen again)
-			{key: key(1), cpuValues: []bpfFlowStat{{Bytes: 11, Skbs: 2, FirstSeenNs: 1}}},
+			{key: key(1), cpuValues: []cusumFlowStat{{Bytes: 11, Skbs: 2, FirstSeenNs: 1}}},
 		},
 		{ // poll @300: only key 1 — the slot@100 is still retained here (depth 3),
 			// so keys 2/3 are still "live" in it; compaction must NOT fire yet.
-			{key: key(1), cpuValues: []bpfFlowStat{{Bytes: 12, Skbs: 3, FirstSeenNs: 1}}},
+			{key: key(1), cpuValues: []cusumFlowStat{{Bytes: 12, Skbs: 3, FirstSeenNs: 1}}},
 		},
 		{ // poll @400: only key 1 — this evicts slot@100, so keys 2/3 are now dead
 			// in every retained slot (200,300,400); compaction fires here.
-			{key: key(1), cpuValues: []bpfFlowStat{{Bytes: 13, Skbs: 4, FirstSeenNs: 1}}},
+			{key: key(1), cpuValues: []cusumFlowStat{{Bytes: 13, Skbs: 4, FirstSeenNs: 1}}},
 		},
 	}}
 
@@ -309,10 +309,10 @@ func TestFlowRingCompactionKeepsLiveValuesIntact(t *testing.T) {
 func TestFlowRingAbsentKeyIsNotOK(t *testing.T) {
 	r := newFlowRing(nil, 4)
 	reader := &fakeFlowStatsReader{calls: [][]struct {
-		key       bpfFlowKey
-		cpuValues []bpfFlowStat
+		key       cusumFlowKey
+		cpuValues []cusumFlowStat
 	}{
-		{{key: key(1), cpuValues: []bpfFlowStat{{Bytes: 100, Skbs: 1, FirstSeenNs: 10}}}},
+		{{key: key(1), cpuValues: []cusumFlowStat{{Bytes: 100, Skbs: 1, FirstSeenNs: 10}}}},
 	}}
 	mustPoll(t, r, 100, reader)
 

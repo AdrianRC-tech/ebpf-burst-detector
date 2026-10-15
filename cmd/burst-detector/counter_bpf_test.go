@@ -4,14 +4,11 @@ import (
 	"encoding/binary"
 	"errors"
 	"math/bits"
-	"net"
 	"strings"
 	"syscall"
 	"testing"
-	"time"
 
 	"github.com/cilium/ebpf"
-	"github.com/cilium/ebpf/ringbuf"
 	"github.com/cilium/ebpf/rlimit"
 )
 
@@ -24,9 +21,9 @@ import (
 // skipped, never actually exercising the BPF program under a privileged run.
 // clearPinning gives each test fresh, unpinned maps instead.
 func TestClearPinningRemovesAllPinning(t *testing.T) {
-	spec, err := loadBpf()
+	spec, err := loadCounter()
 	if err != nil {
-		t.Fatalf("loadBpf: %v", err)
+		t.Fatalf("loadCounter: %v", err)
 	}
 
 	pinned := 0
@@ -83,13 +80,13 @@ func TestIngressCounterIncrementsBySkbLen(t *testing.T) {
 		t.Skipf("RemoveMemlock failed (need CAP_BPF / root): %v", err)
 	}
 
-	spec, err := loadBpf()
+	spec, err := loadCounter()
 	if err != nil {
-		t.Fatalf("loadBpf: %v", err)
+		t.Fatalf("loadCounter: %v", err)
 	}
 	clearPinning(spec)
 
-	var objs bpfObjects
+	var objs counterObjects
 	if err := spec.LoadAndAssign(&objs, nil); err != nil {
 		skipUnlessPrivileged(t, "loading bpf objects", err)
 	}
@@ -116,91 +113,6 @@ func TestIngressCounterIncrementsBySkbLen(t *testing.T) {
 	}
 	if total != uint64(len(pkt)) {
 		t.Fatalf("counter = %d, want %d (skb->len)", total, len(pkt))
-	}
-}
-
-// TestTraceParseBranchVerifierAndSubmit closes the verifier-coverage gap: it
-// loads the BPF object with trace_packets=1 so the verifier is forced to
-// accept the IPv4 parse branch (which is dead-code-eliminated at the default
-// trace_packets=0). It then runs the program against a synthetic packet and
-// opens the ring buffer so the caller can assert a record was submitted.
-//
-// Requires CAP_BPF (or root). Skipped automatically on unprivileged runs.
-func TestTraceParseBranchVerifierAndSubmit(t *testing.T) {
-	if err := rlimit.RemoveMemlock(); err != nil {
-		t.Skipf("RemoveMemlock failed (need CAP_BPF / root): %v", err)
-	}
-
-	spec, err := loadBpf()
-	if err != nil {
-		t.Fatalf("loadBpf: %v", err)
-	}
-	clearPinning(spec)
-
-	vs, found := spec.Variables["trace_packets"]
-	if !found {
-		t.Fatal("variable trace_packets not found in BPF object")
-	}
-	if err := vs.Set(uint8(1)); err != nil {
-		t.Fatalf("setting trace_packets: %v", err)
-	}
-
-	var objs bpfObjects
-	if err := spec.LoadAndAssign(&objs, nil); err != nil {
-		skipUnlessPrivileged(t, "loading bpf objects", err)
-	}
-	defer objs.Close()
-
-	pkt := makeTestPacket(1500)
-
-	ret, err := objs.IngressCounter.Run(&ebpf.RunOptions{Data: pkt})
-	if err != nil {
-		if errors.Is(err, ebpf.ErrNotSupported) {
-			t.Skipf("BPF_PROG_TEST_RUN not supported on this kernel: %v", err)
-		}
-		t.Fatalf("Program.Run: %v", err)
-	}
-	if ret != uint32(0xFFFFFFFF) {
-		t.Fatalf("program returned %d, want TCX_NEXT (0xFFFFFFFF)", ret)
-	}
-
-	rd, err := ringbuf.NewReader(objs.PktTraceRb)
-	if err != nil {
-		t.Fatalf("ringbuf.NewReader: %v", err)
-	}
-	defer rd.Close()
-
-	rd.SetDeadline(time.Now().Add(time.Second))
-	rec, err := rd.Read()
-	if err != nil {
-		t.Fatalf("ringbuf.Read: %v", err)
-	}
-
-	tr, err := decodePktTrace(rec.RawSample)
-	if err != nil {
-		t.Fatalf("decodePktTrace: %v", err)
-	}
-
-	if tr.Family != 4 {
-		t.Errorf("Family = %d, want 4 (IPv4)", tr.Family)
-	}
-	if tr.Len != uint32(len(pkt)) {
-		t.Errorf("Len = %d, want %d (skb->len)", tr.Len, len(pkt))
-	}
-	if tr.Protocol != 6 {
-		t.Errorf("Protocol = %d, want 6 (TCP)", tr.Protocol)
-	}
-	if !tr.SrcIP.Equal(net.IP{192, 0, 2, 1}) {
-		t.Errorf("SrcIP = %v, want 192.0.2.1", tr.SrcIP)
-	}
-	if !tr.DstIP.Equal(net.IP{192, 0, 2, 2}) {
-		t.Errorf("DstIP = %v, want 192.0.2.2", tr.DstIP)
-	}
-	if tr.SrcPort != 1234 {
-		t.Errorf("SrcPort = %d, want 1234", tr.SrcPort)
-	}
-	if tr.DstPort != 80 {
-		t.Errorf("DstPort = %d, want 80", tr.DstPort)
 	}
 }
 
@@ -336,81 +248,95 @@ func loadFlowTestObjects(t *testing.T) *flowObjects {
 	return &objs
 }
 
-// TestFlowCounterDistinctKeysForRequestAndResponse: a TCP request and its
-// reversed response must land on two distinct flow_stats keys, each with
-// ports in network byte order and bytes/skbs matching exactly one packet.
-func TestFlowCounterDistinctKeysForRequestAndResponse(t *testing.T) {
-	objs := loadFlowTestObjects(t)
-
+// TestFlowCounterFlows runs flow_counter over a sequence of packets and checks
+// the per-key bytes/skbs it accumulates. Every case also checks that a key's
+// first_seen_ns never moves once set.
+func TestFlowCounterFlows(t *testing.T) {
 	client := [4]byte{192, 0, 2, 1}
 	server := [4]byte{192, 0, 2, 2}
-	reqPkt := makeIPv4Packet(tcpProto, client, server, 1234, 80, 0, 1500)
-	respPkt := makeIPv4Packet(tcpProto, server, client, 80, 1234, 0, 1500)
+	reqKey := flowFlowKey{
+		SrcIp: rawIPv4(client), DstIp: rawIPv4(server),
+		SrcPort: rawPort(1234), DstPort: rawPort(80), Proto: tcpProto,
+	}
+	respKey := flowFlowKey{
+		SrcIp: rawIPv4(server), DstIp: rawIPv4(client),
+		SrcPort: rawPort(80), DstPort: rawPort(1234), Proto: tcpProto,
+	}
+	req := makeIPv4Packet(tcpProto, client, server, 1234, 80, 0, 1500)
+	resp := makeIPv4Packet(tcpProto, server, client, 80, 1234, 0, 1500)
 
-	runFlowCounter(t, objs, reqPkt)
-	runFlowCounter(t, objs, respPkt)
-
-	cases := []struct {
+	type want struct{ bytes, skbs uint64 }
+	tests := []struct {
 		name string
-		key  flowFlowKey
-		want int
+		pkts [][]byte
+		want map[flowFlowKey]want
 	}{
 		{
-			name: "request",
-			key: flowFlowKey{
-				SrcIp: rawIPv4(client), DstIp: rawIPv4(server),
-				SrcPort: rawPort(1234), DstPort: rawPort(80), Proto: tcpProto,
+			// Request and its reversed response land on distinct keys, with
+			// ports in network byte order.
+			name: "tcp request and response are distinct keys",
+			pkts: [][]byte{req, resp},
+			want: map[flowFlowKey]want{
+				reqKey:  {uint64(len(req)), 1},
+				respKey: {uint64(len(resp)), 1},
 			},
-			want: len(reqPkt),
 		},
 		{
-			name: "response",
-			key: flowFlowKey{
-				SrcIp: rawIPv4(server), DstIp: rawIPv4(client),
-				SrcPort: rawPort(80), DstPort: rawPort(1234), Proto: tcpProto,
+			// UDP shares the port layout at the transport header's first 4 bytes.
+			name: "udp ports intact",
+			pkts: [][]byte{makeIPv4Packet(udpProto, client, server, 5353, 53, 0, 200)},
+			want: map[flowFlowKey]want{
+				{SrcIp: rawIPv4(client), DstIp: rawIPv4(server), SrcPort: rawPort(5353), DstPort: rawPort(53), Proto: udpProto}: {200, 1},
 			},
-			want: len(respPkt),
+		},
+		{
+			name: "repeated key accumulates",
+			pkts: [][]byte{
+				makeIPv4Packet(tcpProto, client, server, 1234, 80, 0, 100),
+				makeIPv4Packet(tcpProto, client, server, 1234, 80, 0, 200),
+			},
+			want: map[flowFlowKey]want{reqKey: {300, 2}},
+		},
+		{
+			// A non-first fragment has no transport header at the base offset,
+			// so the key's ports must be 0 even though nonzero bytes sit there.
+			name: "non-first fragment zeroes ports",
+			pkts: [][]byte{makeIPv4Packet(tcpProto, client, server, 9999, 9999, 32, 100)},
+			want: map[flowFlowKey]want{
+				{SrcIp: rawIPv4(client), DstIp: rawIPv4(server), Proto: tcpProto}: {100, 1},
+			},
 		},
 	}
-	for _, tc := range cases {
-		bytesSum, skbsSum, _, err := sumFlowStat(objs.FlowStats, tc.key)
-		if err != nil {
-			t.Fatalf("%s: sumFlowStat: %v", tc.name, err)
-		}
-		if bytesSum != uint64(tc.want) {
-			t.Errorf("%s: bytes = %d, want %d", tc.name, bytesSum, tc.want)
-		}
-		if skbsSum != 1 {
-			t.Errorf("%s: skbs = %d, want 1", tc.name, skbsSum)
-		}
-	}
-}
-
-// TestFlowCounterCountsUDPWithPortsIntact mirrors the TCP case for UDP,
-// which shares the same src/dst port layout at the transport header's
-// first 4 bytes.
-func TestFlowCounterCountsUDPWithPortsIntact(t *testing.T) {
-	objs := loadFlowTestObjects(t)
-
-	src := [4]byte{192, 0, 2, 1}
-	dst := [4]byte{192, 0, 2, 2}
-	pkt := makeIPv4Packet(udpProto, src, dst, 5353, 53, 0, 200)
-
-	runFlowCounter(t, objs, pkt)
-
-	key := flowFlowKey{
-		SrcIp: rawIPv4(src), DstIp: rawIPv4(dst),
-		SrcPort: rawPort(5353), DstPort: rawPort(53), Proto: udpProto,
-	}
-	bytesSum, skbsSum, _, err := sumFlowStat(objs.FlowStats, key)
-	if err != nil {
-		t.Fatalf("sumFlowStat: %v", err)
-	}
-	if bytesSum != uint64(len(pkt)) {
-		t.Errorf("bytes = %d, want %d", bytesSum, len(pkt))
-	}
-	if skbsSum != 1 {
-		t.Errorf("skbs = %d, want 1", skbsSum)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			objs := loadFlowTestObjects(t)
+			firstSeen := map[flowFlowKey]uint64{}
+			for _, pkt := range tc.pkts {
+				runFlowCounter(t, objs, pkt)
+				for key := range tc.want {
+					_, _, fs, err := sumFlowStat(objs.FlowStats, key)
+					if err != nil {
+						continue // key not inserted yet
+					}
+					if prev := firstSeen[key]; prev != 0 && fs != prev {
+						t.Errorf("first_seen_ns changed on repeat: %d -> %d", prev, fs)
+					}
+					firstSeen[key] = fs
+				}
+			}
+			for key, w := range tc.want {
+				bytesSum, skbsSum, fs, err := sumFlowStat(objs.FlowStats, key)
+				if err != nil {
+					t.Fatalf("sumFlowStat(%+v): %v", key, err)
+				}
+				if bytesSum != w.bytes || skbsSum != w.skbs {
+					t.Errorf("key %+v: bytes/skbs = %d/%d, want %d/%d", key, bytesSum, skbsSum, w.bytes, w.skbs)
+				}
+				if fs == 0 {
+					t.Errorf("key %+v: first_seen_ns = 0, want nonzero", key)
+				}
+			}
+		})
 	}
 }
 
@@ -438,75 +364,6 @@ func TestFlowCounterIPv6IsParseAnomaly(t *testing.T) {
 	}
 	if err := it.Err(); err != nil {
 		t.Fatalf("iterating flow_stats: %v", err)
-	}
-}
-
-// TestFlowCounterAccumulatesOnRepeatedKey: a second packet on the same
-// 5-tuple must add to bytes/skbs without moving first_seen_ns.
-func TestFlowCounterAccumulatesOnRepeatedKey(t *testing.T) {
-	objs := loadFlowTestObjects(t)
-
-	src := [4]byte{192, 0, 2, 1}
-	dst := [4]byte{192, 0, 2, 2}
-	pkt1 := makeIPv4Packet(tcpProto, src, dst, 1234, 80, 0, 100)
-	pkt2 := makeIPv4Packet(tcpProto, src, dst, 1234, 80, 0, 200)
-	key := flowFlowKey{
-		SrcIp: rawIPv4(src), DstIp: rawIPv4(dst),
-		SrcPort: rawPort(1234), DstPort: rawPort(80), Proto: tcpProto,
-	}
-
-	runFlowCounter(t, objs, pkt1)
-	_, _, firstSeen1, err := sumFlowStat(objs.FlowStats, key)
-	if err != nil {
-		t.Fatalf("sumFlowStat after first packet: %v", err)
-	}
-	if firstSeen1 == 0 {
-		t.Fatal("first_seen_ns = 0 after first packet, want nonzero")
-	}
-
-	runFlowCounter(t, objs, pkt2)
-	bytesSum, skbsSum, firstSeen2, err := sumFlowStat(objs.FlowStats, key)
-	if err != nil {
-		t.Fatalf("sumFlowStat after second packet: %v", err)
-	}
-	if want := uint64(len(pkt1) + len(pkt2)); bytesSum != want {
-		t.Errorf("bytes = %d, want %d", bytesSum, want)
-	}
-	if skbsSum != 2 {
-		t.Errorf("skbs = %d, want 2", skbsSum)
-	}
-	if firstSeen2 != firstSeen1 {
-		t.Errorf("first_seen_ns changed on repeat: %d -> %d", firstSeen1, firstSeen2)
-	}
-}
-
-// TestFlowCounterNonFirstFragmentZeroesPorts: a non-first fragment has no
-// transport header at the base offset, so flow_counter must not read the
-// bytes that happen to sit at the port offset — the key's ports must be 0,
-// matching the ground-truth trace path's fragment handling.
-func TestFlowCounterNonFirstFragmentZeroesPorts(t *testing.T) {
-	objs := loadFlowTestObjects(t)
-
-	src := [4]byte{192, 0, 2, 1}
-	dst := [4]byte{192, 0, 2, 2}
-	// Nonzero, plausible-looking port bytes at the transport offset: if
-	// flow_counter incorrectly read them despite the fragment offset, the
-	// looked-up key below (with zero ports) would not match and this test
-	// would fail with ErrKeyNotExist.
-	pkt := makeIPv4Packet(tcpProto, src, dst, 9999, 9999, 32, 100)
-
-	runFlowCounter(t, objs, pkt)
-
-	key := flowFlowKey{SrcIp: rawIPv4(src), DstIp: rawIPv4(dst), Proto: tcpProto}
-	bytesSum, skbsSum, _, err := sumFlowStat(objs.FlowStats, key)
-	if err != nil {
-		t.Fatalf("sumFlowStat(zero-port key): %v", err)
-	}
-	if bytesSum != uint64(len(pkt)) {
-		t.Errorf("bytes = %d, want %d", bytesSum, len(pkt))
-	}
-	if skbsSum != 1 {
-		t.Errorf("skbs = %d, want 1", skbsSum)
 	}
 }
 

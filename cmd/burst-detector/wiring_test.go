@@ -117,12 +117,12 @@ func drainEvent(changePointNs uint64) BurstEvent {
 func TestAttributionStatePairsOnsetAndDrain(t *testing.T) {
 	f := fk(1, 100, 1111, 80)
 	reader := &fakeFlowStatsReader{calls: [][]struct {
-		key       bpfFlowKey
-		cpuValues []bpfFlowStat
+		key       cusumFlowKey
+		cpuValues []cusumFlowStat
 	}{
-		{{key: f, cpuValues: []bpfFlowStat{{Bytes: 100_000, Skbs: 100, FirstSeenNs: 1}}}}, // seed poll @0ns
-		{{key: f, cpuValues: []bpfFlowStat{{Bytes: 200_000, Skbs: 200, FirstSeenNs: 1}}}}, // s0 poll @1s (onset)
-		{{key: f, cpuValues: []bpfFlowStat{{Bytes: 500_000, Skbs: 500, FirstSeenNs: 1}}}}, // s1 poll @2s (drain, fresh sync)
+		{{key: f, cpuValues: []cusumFlowStat{{Bytes: 100_000, Skbs: 100, FirstSeenNs: 1}}}}, // seed poll @0ns
+		{{key: f, cpuValues: []cusumFlowStat{{Bytes: 200_000, Skbs: 200, FirstSeenNs: 1}}}}, // s0 poll @1s (onset)
+		{{key: f, cpuValues: []cusumFlowStat{{Bytes: 500_000, Skbs: 500, FirstSeenNs: 1}}}}, // s1 poll @2s (drain, fresh sync)
 	}}
 	clock := &fakeClock{}
 	anomalies := &fakeAnomalyReader{parseAnomaly: 5, lruSaturated: 1}
@@ -185,11 +185,11 @@ func TestAttributionStatePairsOnsetAndDrain(t *testing.T) {
 func TestAttributionStateEmitFallsBackToOldestSlotAndSetsTruncated(t *testing.T) {
 	f := fk(1, 100, 1, 2)
 	reader := &fakeFlowStatsReader{calls: [][]struct {
-		key       bpfFlowKey
-		cpuValues []bpfFlowStat
+		key       cusumFlowKey
+		cpuValues []cusumFlowStat
 	}{
-		{{key: f, cpuValues: []bpfFlowStat{{Bytes: 1000, Skbs: 1, FirstSeenNs: 1}}}}, // oldest retained slot @1000
-		{{key: f, cpuValues: []bpfFlowStat{{Bytes: 2000, Skbs: 2, FirstSeenNs: 1}}}}, // fresh drain-time poll @2000
+		{{key: f, cpuValues: []cusumFlowStat{{Bytes: 1000, Skbs: 1, FirstSeenNs: 1}}}}, // oldest retained slot @1000
+		{{key: f, cpuValues: []cusumFlowStat{{Bytes: 2000, Skbs: 2, FirstSeenNs: 1}}}}, // fresh drain-time poll @2000
 	}}
 	clock := &fakeClock{}
 	writer := &fakeRecordWriter{}
@@ -227,10 +227,10 @@ func TestAttributionStateEmitFallsBackToOldestSlotAndSetsTruncated(t *testing.T)
 func TestAttributionStateEmitSerializesWriterAccess(t *testing.T) {
 	f := fk(1, 100, 1, 2)
 	reader := &fakeFlowStatsReader{calls: [][]struct {
-		key       bpfFlowKey
-		cpuValues []bpfFlowStat
+		key       cusumFlowKey
+		cpuValues []cusumFlowStat
 	}{
-		{{key: f, cpuValues: []bpfFlowStat{{Bytes: 100, Skbs: 1, FirstSeenNs: 1}}}},
+		{{key: f, cpuValues: []cusumFlowStat{{Bytes: 100, Skbs: 1, FirstSeenNs: 1}}}},
 	}}
 	clock := &fakeClock{}
 	writer := &fakeRecordWriter{}
@@ -259,10 +259,10 @@ func TestAttributionStateEmitSerializesWriterAccess(t *testing.T) {
 
 func TestAttributionStateDrainWithNoPendingOnsetIsIgnored(t *testing.T) {
 	reader := &fakeFlowStatsReader{calls: [][]struct {
-		key       bpfFlowKey
-		cpuValues []bpfFlowStat
+		key       cusumFlowKey
+		cpuValues []cusumFlowStat
 	}{
-		{{key: fk(1, 100, 1, 2), cpuValues: []bpfFlowStat{{Bytes: 1, Skbs: 1, FirstSeenNs: 1}}}},
+		{{key: fk(1, 100, 1, 2), cpuValues: []cusumFlowStat{{Bytes: 1, Skbs: 1, FirstSeenNs: 1}}}},
 	}}
 	clock := &fakeClock{}
 	writer := &fakeRecordWriter{}
@@ -278,12 +278,12 @@ func TestAttributionStateDrainWithNoPendingOnsetIsIgnored(t *testing.T) {
 func TestAttributionStateWatchdogEmitsUnpairedAndIgnoresLateDrain(t *testing.T) {
 	f := fk(1, 100, 1, 2)
 	reader := &fakeFlowStatsReader{calls: [][]struct {
-		key       bpfFlowKey
-		cpuValues []bpfFlowStat
+		key       cusumFlowKey
+		cpuValues []cusumFlowStat
 	}{
-		{{key: f, cpuValues: []bpfFlowStat{{Bytes: 100, Skbs: 1, FirstSeenNs: 1}}}},
-		{{key: f, cpuValues: []bpfFlowStat{{Bytes: 200, Skbs: 2, FirstSeenNs: 1}}}},
-		{{key: f, cpuValues: []bpfFlowStat{{Bytes: 300, Skbs: 3, FirstSeenNs: 1}}}}, // watchdog's fresh snapshot
+		{{key: f, cpuValues: []cusumFlowStat{{Bytes: 100, Skbs: 1, FirstSeenNs: 1}}}},
+		{{key: f, cpuValues: []cusumFlowStat{{Bytes: 200, Skbs: 2, FirstSeenNs: 1}}}},
+		{{key: f, cpuValues: []cusumFlowStat{{Bytes: 300, Skbs: 3, FirstSeenNs: 1}}}}, // watchdog's fresh snapshot
 	}}
 	clock := &fakeClock{}
 	writer := &fakeRecordWriter{}
@@ -321,10 +321,10 @@ func TestAttributionStateWatchdogEmitsUnpairedAndIgnoresLateDrain(t *testing.T) 
 func TestAttributionStateWatchdogDoesNothingBeforeTimeout(t *testing.T) {
 	f := fk(1, 100, 1, 2)
 	reader := &fakeFlowStatsReader{calls: [][]struct {
-		key       bpfFlowKey
-		cpuValues []bpfFlowStat
+		key       cusumFlowKey
+		cpuValues []cusumFlowStat
 	}{
-		{{key: f, cpuValues: []bpfFlowStat{{Bytes: 100, Skbs: 1, FirstSeenNs: 1}}}},
+		{{key: f, cpuValues: []cusumFlowStat{{Bytes: 100, Skbs: 1, FirstSeenNs: 1}}}},
 	}}
 	clock := &fakeClock{}
 	writer := &fakeRecordWriter{}
@@ -342,24 +342,24 @@ func TestAttributionStateWatchdogDoesNothingBeforeTimeout(t *testing.T) {
 	}
 }
 
-type fakeResolver map[string]string
+type fakeServiceResolver map[string]string
 
-func (f fakeResolver) resolve(ip string) string { return f[ip] }
+func (f fakeServiceResolver) resolve(ip string) string { return f[ip] }
 
 // TestAttributionStateEmitLabelsServices: emit fills src/dst_service from the
 // resolver; an unresolvable IP leaves the field empty rather than failing.
 func TestAttributionStateEmitLabelsServices(t *testing.T) {
 	f := fk(1, 2, 1111, 80)
 	reader := &fakeFlowStatsReader{calls: [][]struct {
-		key       bpfFlowKey
-		cpuValues []bpfFlowStat
+		key       cusumFlowKey
+		cpuValues []cusumFlowStat
 	}{
-		{{key: f, cpuValues: []bpfFlowStat{{Bytes: 100, Skbs: 1, FirstSeenNs: 1}}}},
+		{{key: f, cpuValues: []cusumFlowStat{{Bytes: 100, Skbs: 1, FirstSeenNs: 1}}}},
 	}}
 	clock := &fakeClock{}
 	writer := &fakeRecordWriter{}
 	s := newTestAttributionState(reader, clock, &fakeAnomalyReader{}, writer)
-	s.resolver = fakeResolver{"1.0.0.0": "default/frontend"} // dst 2.0.0.0 unknown
+	s.resolver = fakeServiceResolver{"1.0.0.0": "default/frontend"} // dst 2.0.0.0 unknown
 
 	clock.nowNs = 1000
 	if err := s.ring.poll(clock.now()); err != nil {

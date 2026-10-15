@@ -1,4 +1,4 @@
-package walltime
+package main
 
 import (
 	"testing"
@@ -8,7 +8,7 @@ import (
 func TestWallClock(t *testing.T) {
 	base := time.Date(2026, 6, 30, 12, 0, 0, 0, time.UTC)
 	// Anchor: wall=base, monoNs=1_000_000_000 (1 s since some boot reference).
-	anchor := Anchor{wall: base, monoNs: 1_000_000_000}
+	anchor := wallAnchor{wall: base, monoNs: 1_000_000_000}
 
 	tests := []struct {
 		name   string

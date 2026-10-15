@@ -59,21 +59,3 @@ func TestDecodeEvent_Drain(t *testing.T) {
 		t.Errorf("ChangePointNs = %d, want 1_900_000_000", ev.ChangePointNs)
 	}
 }
-
-func TestDecodeEvent_TooShort(t *testing.T) {
-	if _, err := decodeEvent(make([]byte, 10)); err == nil {
-		t.Fatal("expected error for short input, got nil")
-	}
-}
-
-func TestEventTypeString(t *testing.T) {
-	if s := eventTypeString(EventOnset); s != "onset" {
-		t.Errorf("EventOnset → %q, want %q", s, "onset")
-	}
-	if s := eventTypeString(EventDrain); s != "drain" {
-		t.Errorf("EventDrain → %q, want %q", s, "drain")
-	}
-	if s := eventTypeString(99); s != "unknown" {
-		t.Errorf("unknown type → %q, want %q", s, "unknown")
-	}
-}

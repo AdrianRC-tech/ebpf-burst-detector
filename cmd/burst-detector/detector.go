@@ -2,15 +2,9 @@ package main
 
 import (
 	"fmt"
-	"os"
 
 	"github.com/cilium/ebpf"
-	"github.com/cilium/ebpf/rlimit"
 )
-
-// bpfPinDir is the BPF filesystem directory that holds maps shared the different
-// bpf programs we have.
-const bpfPinDir = "/sys/fs/bpf/burst-detector"
 
 // cusumParams holds the CUSUM tuning parameters baked into the BPF object's
 // .rodata at load time. They cannot be changed after loadCusumDetector returns.
@@ -28,7 +22,7 @@ type cusumParams struct {
 // detector owns the live BPF objects for the CUSUM program. Caller must call
 // Close when finished to release kernel resources.
 type detector struct {
-	objs bpfObjects
+	objs cusumObjects
 
 	// hSlackMult is the effective h_slack_mult value injected into .rodata —
 	// either the caller's explicit override or the value deriveHSlackMult
@@ -94,26 +88,17 @@ func deriveHSlackMult(spec *ebpf.CollectionSpec, params cusumParams) (*uint64, e
 
 // loadCusumDetector loads the CUSUM BPF object into the kernel.
 //
-// Map sharing: node_ingr_bytes is declared with LIBBPF_PIN_BY_NAME and
-// pinned at bpfPinDir/node_ingr_bytes. cilium/ebpf opens the existing pin
-// (created by ingress-counter on first load) and reuses the same kernel map.
-// If the pin does not yet exist (e.g. cusum-detector starts before
-// ingress-counter), cilium/ebpf creates the map and pins it; ingress-counter
-// then picks it up on its own load.
+// Map sharing: node_ingr_bytes and the flow maps are declared with
+// LIBBPF_PIN_BY_NAME and pinned under bpfPinDir. The counter and flow objects
+// are loaded first (initAttachment), so cilium/ebpf opens their pins and reuses
+// the same kernel maps. The caller must have removed the memlock rlimit and
+// created bpfPinDir.
 //
 // Parameter injection: cusumParams values are written to .rodata via the
-// generated bpfVariableSpecs before LoadAndAssign, so the BPF program sees
+// generated cusumVariableSpecs before LoadAndAssign, so the BPF program sees
 // them as `volatile const` constants.
 func loadCusumDetector(params cusumParams) (*detector, error) {
-	if err := rlimit.RemoveMemlock(); err != nil {
-		return nil, fmt.Errorf("removing memlock rlimit: %w", err)
-	}
-
-	if err := os.MkdirAll(bpfPinDir, 0o755); err != nil {
-		return nil, fmt.Errorf("creating pin dir %s: %w", bpfPinDir, err)
-	}
-
-	spec, err := loadBpf()
+	spec, err := loadCusum()
 	if err != nil {
 		return nil, fmt.Errorf("loading bpf collection spec: %w", err)
 	}
@@ -181,7 +166,7 @@ func loadCusumDetector(params cusumParams) (*detector, error) {
 		}
 	}
 
-	var objs bpfObjects
+	var objs cusumObjects
 	if err := spec.LoadAndAssign(&objs, &ebpf.CollectionOptions{
 		Maps: ebpf.MapOptions{PinPath: bpfPinDir},
 	}); err != nil {
@@ -206,7 +191,7 @@ func (d *detector) seedPrevTotal() error {
 		total += v
 	}
 
-	state := bpfCusumStateT{PrevTotal: total} // UpperSum and LowerSum default to zero
+	state := cusumCusumStateT{PrevTotal: total} // UpperSum and LowerSum default to zero
 	if err := d.objs.CusumState.Put(uint32(0), state); err != nil {
 		return fmt.Errorf("seeding cusum_state.prev_total: %w", err)
 	}

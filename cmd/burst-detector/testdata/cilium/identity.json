@@ -1,0 +1,74 @@
+[
+  {
+    "key": 0,
+    "value": {
+      "id": 59476,
+      "labels": [
+        "k8s:app.kubernetes.io/name=search",
+        "k8s:io.cilium.k8s.namespace.labels.kubernetes.io/metadata.name=default",
+        "k8s:io.cilium.k8s.policy.cluster=default",
+        "k8s:io.cilium.k8s.policy.serviceaccount=default",
+        "k8s:io.kompose.service=search",
+        "k8s:io.kubernetes.pod.namespace=default"
+      ]
+    }
+  },
+  {
+    "key": 1,
+    "value": {
+      "id": 7963,
+      "labels": [
+        "k8s:app.kubernetes.io/name=user",
+        "k8s:io.cilium.k8s.namespace.labels.kubernetes.io/metadata.name=default",
+        "k8s:io.cilium.k8s.policy.cluster=default",
+        "k8s:io.cilium.k8s.policy.serviceaccount=default",
+        "k8s:io.kompose.service=user",
+        "k8s:io.kubernetes.pod.namespace=default"
+      ]
+    }
+  },
+  {
+    "key": 2,
+    "value": {
+      "id": 13770,
+      "labels": [
+        "k8s:app.kubernetes.io/name=hubble-relay",
+        "k8s:app.kubernetes.io/part-of=cilium",
+        "k8s:io.cilium.k8s.namespace.labels.kubernetes.io/metadata.name=kube-system",
+        "k8s:io.cilium.k8s.policy.cluster=default",
+        "k8s:io.cilium.k8s.policy.serviceaccount=hubble-relay",
+        "k8s:io.kubernetes.pod.namespace=kube-system",
+        "k8s:k8s-app=hubble-relay"
+      ]
+    }
+  },
+  {
+    "key": 3,
+    "value": {
+      "id": 21385,
+      "labels": [
+        "k8s:app.kubernetes.io/name=hubble-ui",
+        "k8s:app.kubernetes.io/part-of=cilium",
+        "k8s:io.cilium.k8s.namespace.labels.kubernetes.io/metadata.name=kube-system",
+        "k8s:io.cilium.k8s.policy.cluster=default",
+        "k8s:io.cilium.k8s.policy.serviceaccount=hubble-ui",
+        "k8s:io.kubernetes.pod.namespace=kube-system",
+        "k8s:k8s-app=hubble-ui"
+      ]
+    }
+  },
+  {
+    "key": 4,
+    "value": {
+      "id": 10886,
+      "labels": [
+        "k8s:app.kubernetes.io/name=jaeger",
+        "k8s:io.cilium.k8s.namespace.labels.kubernetes.io/metadata.name=default",
+        "k8s:io.cilium.k8s.policy.cluster=default",
+        "k8s:io.cilium.k8s.policy.serviceaccount=default",
+        "k8s:io.kompose.service=jaeger",
+        "k8s:io.kubernetes.pod.namespace=default"
+      ]
+    }
+  }
+]

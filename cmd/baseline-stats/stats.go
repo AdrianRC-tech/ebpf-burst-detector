@@ -116,7 +116,7 @@ func deriveParams(s Stats, kMult, hMult float64) SuggestedParams {
 }
 
 // printReport writes a human-readable statistics block and the suggested
-// cusum-detector flags to w.
+// burst-detector flags to w.
 func printReport(w io.Writer, s Stats, params SuggestedParams, kMult, hMult float64) {
 	fmt.Fprintf(w, "=== Baseline Statistics (n=%d windows) ===\n\n", s.Count)
 	fmt.Fprintf(w, "  mean              %14.0f bytes\n", s.Mean)

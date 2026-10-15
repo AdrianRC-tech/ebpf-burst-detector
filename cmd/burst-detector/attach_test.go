@@ -11,14 +11,14 @@ func TestMatchNetnsByNsid(t *testing.T) {
 	const hostInode = "net:[4026531992]"
 
 	tests := []struct {
-		name        string
-		entries     []procNetnsEntry
-		target      int32
-		queryNsid   func(path string) (int32, error)
-		wantPath    string
-		wantErr     bool
-		wantErrSub  string
-		wantCalls   int // expected number of queryNsid invocations
+		name       string
+		entries    []procNetnsEntry
+		target     int32
+		queryNsid  func(path string) (int32, error)
+		wantPath   string
+		wantErr    bool
+		wantErrSub string
+		wantCalls  int // expected number of queryNsid invocations
 	}{
 		{
 			name: "first matching entry is returned",
@@ -26,7 +26,7 @@ func TestMatchNetnsByNsid(t *testing.T) {
 				{Path: "/proc/100/ns/net", Inode: "net:[111]"},
 				{Path: "/proc/200/ns/net", Inode: "net:[222]"},
 			},
-			target:    111,
+			target: 111,
 			queryNsid: func(path string) (int32, error) {
 				if path == "/proc/100/ns/net" {
 					return 111, nil

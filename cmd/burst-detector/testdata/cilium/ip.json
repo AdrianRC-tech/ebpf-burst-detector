@@ -1,0 +1,46 @@
+[
+  {
+    "cidr": "10.0.2.28/32",
+    "hostIP": "172.18.0.3",
+    "identity": 24949,
+    "metadata": {
+      "name": "local-path-provisioner-67b8995b4b-4g79z",
+      "namespace": "local-path-storage",
+      "source": "custom-resource"
+    }
+  },
+  {
+    "cidr": "10.0.2.109/32",
+    "hostIP": "172.18.0.3",
+    "identity": 13770,
+    "metadata": {
+      "name": "hubble-relay-5468f66f59-f8lp4",
+      "namespace": "kube-system",
+      "source": "custom-resource"
+    }
+  },
+  {
+    "cidr": "10.0.2.68/32",
+    "hostIP": "172.18.0.3",
+    "identity": 21385,
+    "metadata": {
+      "name": "hubble-ui-d74c95779-slb44",
+      "namespace": "kube-system",
+      "source": "custom-resource"
+    }
+  },
+  {
+    "cidr": "10.0.0.0/24",
+    "hostIP": "172.18.0.4",
+    "identity": 2
+  },
+  {
+    "cidr": "10.0.1.139/32",
+    "hostIP": "172.18.0.2",
+    "identity": 1
+  },
+  {
+    "cidr": "0.0.0.0/0",
+    "identity": 2
+  }
+]

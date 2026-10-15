@@ -5,8 +5,8 @@ import (
 	"testing"
 )
 
-func mkSnapshot(stampNs uint64, entries map[bpfFlowKey]flowVal) snapshot {
-	index := make(map[bpfFlowKey]int32, len(entries))
+func mkSnapshot(stampNs uint64, entries map[cusumFlowKey]flowVal) snapshot {
+	index := make(map[cusumFlowKey]int32, len(entries))
 	values := make([]flowVal, len(entries))
 	var i int32
 	for k, v := range entries {
@@ -17,8 +17,8 @@ func mkSnapshot(stampNs uint64, entries map[bpfFlowKey]flowVal) snapshot {
 	return snapshot{stampNs: stampNs, index: index, values: values}
 }
 
-func fk(srcIP, dstIP uint32, srcPort, dstPort uint16) bpfFlowKey {
-	return bpfFlowKey{SrcIp: srcIP, DstIp: dstIP, SrcPort: srcPort, DstPort: dstPort, Proto: 6}
+func fk(srcIP, dstIP uint32, srcPort, dstPort uint16) cusumFlowKey {
+	return cusumFlowKey{SrcIp: srcIP, DstIp: dstIP, SrcPort: srcPort, DstPort: dstPort, Proto: 6}
 }
 
 // TestScoreRanksByBytesAndShares: contributors are one per flow, ordered by
@@ -29,12 +29,12 @@ func TestScoreRanksByBytesAndShares(t *testing.T) {
 	big := fk(2, 100, 2222, 80)
 	mid := fk(3, 100, 3333, 80)
 
-	s0 := mkSnapshot(0, map[bpfFlowKey]flowVal{
+	s0 := mkSnapshot(0, map[cusumFlowKey]flowVal{
 		small: {bytes: 10, skbs: 1, firstSeen: 1},
 		big:   {bytes: 10, skbs: 1, firstSeen: 1},
 		mid:   {bytes: 10, skbs: 1, firstSeen: 1},
 	})
-	s1 := mkSnapshot(1_000_000_000, map[bpfFlowKey]flowVal{
+	s1 := mkSnapshot(1_000_000_000, map[cusumFlowKey]flowVal{
 		small: {bytes: 110, skbs: 11, firstSeen: 1}, // +100
 		big:   {bytes: 710, skbs: 71, firstSeen: 1}, // +700
 		mid:   {bytes: 210, skbs: 21, firstSeen: 1}, // +200
@@ -73,9 +73,9 @@ func itoa(p uint16) string { return strconv.Itoa(int(p)) }
 // kept in its place.
 func TestScoreHeaviestFlowNeverDroppedByTopN(t *testing.T) {
 	src := uint32(176)
-	flows := make([]bpfFlowKey, 6)
-	s0m := map[bpfFlowKey]flowVal{}
-	s1m := map[bpfFlowKey]flowVal{}
+	flows := make([]cusumFlowKey, 6)
+	s0m := map[cusumFlowKey]flowVal{}
+	s1m := map[cusumFlowKey]flowVal{}
 	delta := []uint64{0, 5_000, 536_000, 20_000, 1_000, 226_000}
 	for i := range flows {
 		flows[i] = fk(src, 100, uint16(1000+i), 11211)
@@ -111,8 +111,8 @@ func TestScoreTieBreakIsDeterministic(t *testing.T) {
 	a := fk(1, 100, 1, 80)
 	b := fk(2, 100, 1, 80)
 	c := fk(3, 100, 1, 80)
-	s0 := mkSnapshot(0, map[bpfFlowKey]flowVal{})
-	s1 := mkSnapshot(1, map[bpfFlowKey]flowVal{
+	s0 := mkSnapshot(0, map[cusumFlowKey]flowVal{})
+	s1 := mkSnapshot(1, map[cusumFlowKey]flowVal{
 		a: {bytes: 100, skbs: 1, firstSeen: 1},
 		b: {bytes: 100, skbs: 5, firstSeen: 1},
 		c: {bytes: 100, skbs: 5, firstSeen: 1},
@@ -131,8 +131,8 @@ func TestScoreTieBreakIsDeterministic(t *testing.T) {
 // a fresh flow (raw s1 value), not a negative delta.
 func TestScoreDetectsResetByValueDecrease(t *testing.T) {
 	f := fk(1, 100, 1111, 80)
-	s0 := mkSnapshot(1_000_000_000, map[bpfFlowKey]flowVal{f: {bytes: 900_000, skbs: 900, firstSeen: 1}})
-	s1 := mkSnapshot(2_000_000_000, map[bpfFlowKey]flowVal{f: {bytes: 500, skbs: 5, firstSeen: 1}})
+	s0 := mkSnapshot(1_000_000_000, map[cusumFlowKey]flowVal{f: {bytes: 900_000, skbs: 900, firstSeen: 1}})
+	s1 := mkSnapshot(2_000_000_000, map[cusumFlowKey]flowVal{f: {bytes: 500, skbs: 5, firstSeen: 1}})
 
 	rec := score(s0, s1, 10)
 
@@ -148,8 +148,8 @@ func TestScoreDetectsResetByValueDecrease(t *testing.T) {
 // still be a reset if first_seen_ns changed.
 func TestScoreDetectsResetByFirstSeenChange(t *testing.T) {
 	f := fk(1, 100, 1111, 80)
-	s0 := mkSnapshot(1_000_000_000, map[bpfFlowKey]flowVal{f: {bytes: 900_000, skbs: 900, firstSeen: 1}})
-	s1 := mkSnapshot(2_000_000_000, map[bpfFlowKey]flowVal{f: {bytes: 1_000_100, skbs: 5, firstSeen: 2_000_000_000}})
+	s0 := mkSnapshot(1_000_000_000, map[cusumFlowKey]flowVal{f: {bytes: 900_000, skbs: 900, firstSeen: 1}})
+	s1 := mkSnapshot(2_000_000_000, map[cusumFlowKey]flowVal{f: {bytes: 1_000_100, skbs: 5, firstSeen: 2_000_000_000}})
 
 	rec := score(s0, s1, 10)
 
@@ -168,11 +168,11 @@ func TestScoreHandlesEvictedFlow(t *testing.T) {
 	survivor := fk(1, 100, 1111, 80)
 	evicted := fk(2, 100, 2222, 80)
 
-	s0 := mkSnapshot(1_000_000_000, map[bpfFlowKey]flowVal{
+	s0 := mkSnapshot(1_000_000_000, map[cusumFlowKey]flowVal{
 		survivor: {bytes: 100, skbs: 1, firstSeen: 1},
 		evicted:  {bytes: 200, skbs: 2, firstSeen: 1},
 	})
-	s1 := mkSnapshot(2_000_000_000, map[bpfFlowKey]flowVal{
+	s1 := mkSnapshot(2_000_000_000, map[cusumFlowKey]flowVal{
 		survivor: {bytes: 300, skbs: 3, firstSeen: 1},
 	})
 
@@ -190,8 +190,8 @@ func TestScoreHandlesEvictedFlow(t *testing.T) {
 // byte count.
 func TestScoreNewFlowCountsFully(t *testing.T) {
 	f := fk(1, 100, 1111, 80)
-	s0 := mkSnapshot(0, map[bpfFlowKey]flowVal{})
-	s1 := mkSnapshot(1, map[bpfFlowKey]flowVal{f: {bytes: 1234, skbs: 2, firstSeen: 1}})
+	s0 := mkSnapshot(0, map[cusumFlowKey]flowVal{})
+	s1 := mkSnapshot(1, map[cusumFlowKey]flowVal{f: {bytes: 1234, skbs: 2, firstSeen: 1}})
 
 	rec := score(s0, s1, 10)
 
@@ -203,8 +203,8 @@ func TestScoreNewFlowCountsFully(t *testing.T) {
 func TestScoreRespectsTopN(t *testing.T) {
 	a := fk(1, 100, 1111, 80)
 	b := fk(2, 100, 2222, 80)
-	s0 := mkSnapshot(0, map[bpfFlowKey]flowVal{})
-	s1 := mkSnapshot(1, map[bpfFlowKey]flowVal{
+	s0 := mkSnapshot(0, map[cusumFlowKey]flowVal{})
+	s1 := mkSnapshot(1, map[cusumFlowKey]flowVal{
 		a: {bytes: 100, skbs: 1, firstSeen: 1},
 		b: {bytes: 300, skbs: 3, firstSeen: 1},
 	})
@@ -220,9 +220,9 @@ func TestScoreRespectsTopN(t *testing.T) {
 }
 
 func TestScoreContributorCarriesTuple(t *testing.T) {
-	k := bpfFlowKey{SrcIp: 1, DstIp: 2, SrcPort: 0x5000, DstPort: 0x5000, Proto: 6}
-	s1 := mkSnapshot(1, map[bpfFlowKey]flowVal{k: {bytes: 10, skbs: 1, firstSeen: 1}})
-	rec := score(mkSnapshot(0, map[bpfFlowKey]flowVal{}), s1, 10)
+	k := cusumFlowKey{SrcIp: 1, DstIp: 2, SrcPort: 0x5000, DstPort: 0x5000, Proto: 6}
+	s1 := mkSnapshot(1, map[cusumFlowKey]flowVal{k: {bytes: 10, skbs: 1, firstSeen: 1}})
+	rec := score(mkSnapshot(0, map[cusumFlowKey]flowVal{}), s1, 10)
 	c := rec.Contributors[0]
 	if c.Src != endpointString(1, 0x5000) || c.Dst != endpointString(2, 0x5000) || c.Proto != "tcp" {
 		t.Errorf("contributor = %+v", c)

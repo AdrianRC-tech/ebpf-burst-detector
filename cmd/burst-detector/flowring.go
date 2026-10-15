@@ -25,7 +25,7 @@ type flowVal struct {
 // other CPU's slot for that key (ebpf/flow_stats.bpf.c), so a CPU that only
 // ever added bytes via the -EEXIST fallback path has first_seen_ns == 0 and
 // must not affect the min.
-func sumFlowValueAcrossCPUs(cpuValues []bpfFlowStat) flowVal {
+func sumFlowValueAcrossCPUs(cpuValues []cusumFlowStat) flowVal {
 	var v flowVal
 	for _, c := range cpuValues {
 		v.bytes += c.Bytes
@@ -43,7 +43,7 @@ type flowStatsReader interface {
 	// readAll returns every (key, per-CPU flat values) pair currently in the
 	// map, plus the number of per-CPU slots each key's values are divided
 	// into: values[i*possibleCPU : (i+1)*possibleCPU] holds key i's values.
-	readAll() (keys []bpfFlowKey, values []bpfFlowStat, possibleCPU int, err error)
+	readAll() (keys []cusumFlowKey, values []cusumFlowStat, possibleCPU int, err error)
 }
 
 // bpfFlowStatsReader reads objs.FlowStats via one BatchLookup call per
@@ -51,8 +51,8 @@ type flowStatsReader interface {
 type bpfFlowStatsReader struct {
 	m           *ebpf.Map
 	possibleCPU int
-	keysBuf     []bpfFlowKey
-	valuesBuf   []bpfFlowStat
+	keysBuf     []cusumFlowKey
+	valuesBuf   []cusumFlowStat
 }
 
 func newBPFFlowStatsReader(m *ebpf.Map) (*bpfFlowStatsReader, error) {
@@ -64,12 +64,12 @@ func newBPFFlowStatsReader(m *ebpf.Map) (*bpfFlowStatsReader, error) {
 	return &bpfFlowStatsReader{
 		m:           m,
 		possibleCPU: possibleCPU,
-		keysBuf:     make([]bpfFlowKey, count),
-		valuesBuf:   make([]bpfFlowStat, count*possibleCPU),
+		keysBuf:     make([]cusumFlowKey, count),
+		valuesBuf:   make([]cusumFlowStat, count*possibleCPU),
 	}, nil
 }
 
-func (r *bpfFlowStatsReader) readAll() ([]bpfFlowKey, []bpfFlowStat, int, error) {
+func (r *bpfFlowStatsReader) readAll() ([]cusumFlowKey, []cusumFlowStat, int, error) {
 	var cursor ebpf.MapBatchCursor
 	n, err := r.m.BatchLookup(&cursor, r.keysBuf, r.valuesBuf, nil)
 	if err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
@@ -86,14 +86,14 @@ func (r *bpfFlowStatsReader) readAll() ([]bpfFlowKey, []bpfFlowStat, int, error)
 // and compactLocked).
 type snapshot struct {
 	stampNs uint64
-	index   map[bpfFlowKey]int32
+	index   map[cusumFlowKey]int32
 	values  []flowVal
 }
 
 // value returns the flow's state as of this snapshot, and whether it was
 // present at all (a key never seen, or one whose index this slot predates,
 // both resolve to ok=false).
-func (s snapshot) value(key bpfFlowKey) (flowVal, bool) {
+func (s snapshot) value(key cusumFlowKey) (flowVal, bool) {
 	idx, ok := s.index[key]
 	if !ok || int(idx) >= len(s.values) {
 		return flowVal{}, false
@@ -106,7 +106,7 @@ func (s snapshot) value(key bpfFlowKey) (flowVal, bool) {
 }
 
 // all calls yield once for every flow present in this snapshot.
-func (s snapshot) all(yield func(key bpfFlowKey, v flowVal)) {
+func (s snapshot) all(yield func(key cusumFlowKey, v flowVal)) {
 	for k, idx := range s.index {
 		if int(idx) >= len(s.values) {
 			continue
@@ -137,7 +137,7 @@ type flowRing struct {
 	reader flowStatsReader
 	depth  int
 
-	index   map[bpfFlowKey]int32
+	index   map[cusumFlowKey]int32
 	nextIdx int32
 
 	slots []ringSlot // ordered oldest..newest, len <= depth
@@ -147,7 +147,7 @@ func newFlowRing(reader flowStatsReader, depth int) *flowRing {
 	return &flowRing{
 		reader: reader,
 		depth:  depth,
-		index:  make(map[bpfFlowKey]int32),
+		index:  make(map[cusumFlowKey]int32),
 	}
 }
 
@@ -172,7 +172,7 @@ func (r *flowRing) poll(stampNs uint64) error {
 	for _, k := range keys {
 		if _, ok := r.index[k]; !ok {
 			if !grown {
-				newIndex := make(map[bpfFlowKey]int32, len(r.index)+len(keys))
+				newIndex := make(map[cusumFlowKey]int32, len(r.index)+len(keys))
 				for k, i := range r.index {
 					newIndex[k] = i
 				}
@@ -249,7 +249,7 @@ func (r *flowRing) oldest() (snapshot, bool) {
 // than are live, bounding unbounded growth from connection churn. Must be
 // called with mu held.
 func (r *flowRing) compactLocked() {
-	live := make(map[bpfFlowKey]struct{})
+	live := make(map[cusumFlowKey]struct{})
 	dead := 0
 	for k, idx := range r.index {
 		isLive := false
@@ -269,7 +269,7 @@ func (r *flowRing) compactLocked() {
 		return
 	}
 
-	newIndex := make(map[bpfFlowKey]int32, len(live))
+	newIndex := make(map[cusumFlowKey]int32, len(live))
 	var nextIdx int32
 	for k := range live {
 		newIndex[k] = nextIdx

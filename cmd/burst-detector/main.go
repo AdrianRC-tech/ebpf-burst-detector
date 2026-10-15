@@ -1,8 +1,15 @@
-// Command cusum-detector is the userspace driver for the two-sided CUSUM
-// burst detector. It loads the CUSUM BPF object, seeds
-// cusum_state.prev_total from the current counter total to avoid a first-tick
-// false onset, arms the kernel bpf_timer, and logs onset/drain events to a ringbuffer.
-
+// Command burst-detector is the Layer 1 daemon: one process that owns both the
+// data path and the detector. It attaches the tcx-ingress byte counter (and the
+// per-flow counter) to every pod's netkit peer device in the allowed
+// namespaces, loads the timer-driven two-sided CUSUM program, arms its
+// bpf_timer, and logs onset/drain events from the ring buffer. Optionally it
+// writes per-window samples and per-burst flow attribution records.
+//
+// The three BPF objects stay separate (ingress_counter, flow_stats,
+// cusum_detector) and share state through maps pinned under bpfPinDir, which
+// downstream layers can also read. A fatal error in either half cancels the
+// daemon so the detector never runs on stale maps.
+//
 // See README.md for build, attach, and operational guidance.
 package main
 
@@ -15,14 +22,18 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/cilium/ebpf/ringbuf"
-
-	"github.com/AdrianRC-tech/ebpf-burst-detector/internal/walltime"
+	"github.com/cilium/ebpf/rlimit"
 )
+
+// bpfPinDir is the BPF filesystem directory that holds the maps shared by the
+// three BPF programs and read by downstream layers.
+const bpfPinDir = "/sys/fs/bpf/burst-detector"
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
@@ -30,10 +41,12 @@ func main() {
 		logger.Error("fatal", "err", err)
 		os.Exit(1)
 	}
-	logger.Info("cusum detector stopped cleanly")
+	logger.Info("burst-detector stopped cleanly")
 }
 
 func run(logger *slog.Logger) error {
+	namespacesFlag := flag.String("namespaces", "default", "comma-separated allow-list of Kubernetes namespaces to attach to")
+	ciliumSocket := flag.String("cilium-socket", "/var/run/cilium/cilium.sock", "Cilium agent API socket, used to resolve pod namespaces and to label attribution flows with service names")
 	mu0 := flag.Uint64("mu0", 0, "baseline bytes per CUSUM window (default: C constant)")
 	k := flag.Uint64("k", 0, "CUSUM slack factor in bytes (default: C constant)")
 	hOnset := flag.Uint64("h-onset", 0, "onset threshold (upper_sum value) in bytes (default: C constant)")
@@ -44,11 +57,17 @@ func run(logger *slog.Logger) error {
 	sampleCSV := flag.String("sample-csv", "", "path to write window sample CSV (default: stderr)")
 	eventCSV := flag.String("event-csv", "", "path to write onset/drain events as CSV for offline latency analysis (default: slog to stderr)")
 	attributionOut := flag.String("attribution-out", "", "path to write one NDJSON burst attribution record per drain (default: attribution disabled)")
-	ciliumSocket := flag.String("cilium-socket", "/var/run/cilium/cilium.sock", "Cilium agent API socket, used to label attribution flows with service names")
 	ringRetention := flag.Duration("ring-retention", 3*time.Second, "how far back the flow snapshot ring retains history; must cover onset change point to drain, longer bursts are marked truncated")
 	snapshotInterval := flag.Duration("snapshot-interval", 0, "interval between flow snapshots (default: the effective CUSUM window)")
 	topN := flag.Int("top-n", 25, "maximum contributors to include per attribution record")
 	flag.Parse()
+
+	allowedNS := make(map[string]struct{})
+	for _, ns := range strings.Split(*namespacesFlag, ",") {
+		if ns = strings.TrimSpace(ns); ns != "" {
+			allowedNS[ns] = struct{}{}
+		}
+	}
 
 	// Build params with only the flags the user explicitly provided.
 	// Unset flags remain nil so the C .rodata default survives into the kernel.
@@ -73,16 +92,78 @@ func run(logger *slog.Logger) error {
 		}
 	})
 
+	if err := rlimit.RemoveMemlock(); err != nil {
+		return fmt.Errorf("removing memlock rlimit: %w", err)
+	}
+	if err := os.MkdirAll(bpfPinDir, 0o755); err != nil {
+		return fmt.Errorf("creating pin dir %s: %w", bpfPinDir, err)
+	}
+
+	// Load the counter and flow objects first: they create the pinned maps the
+	// detector object then reuses in-process.
+	att, err := initAttachment()
+	if err != nil {
+		return fmt.Errorf("initializing attachment: %w", err)
+	}
 	det, err := loadCusumDetector(params)
 	if err != nil {
+		att.Close()
 		return fmt.Errorf("loading cusum detector: %w", err)
 	}
-	defer det.Close()
+
+	// sigCtx cancels on SIGTERM/SIGINT; cancel lets either half stop the other.
+	sigCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, cancel := context.WithCancel(sigCtx)
+
+	var wg sync.WaitGroup
+	var files []io.Closer // output files; closed only after every goroutine has drained
+
+	// Ordered shutdown: cancel ctx (which also closes the ringbuf readers via
+	// their closer goroutines) → wg.Wait() → output files → att.Close() (links,
+	// flow objs, counter objs) → det.Close(). cancel() and stop() are idempotent.
+	defer func() {
+		cancel()
+		stop()
+		wg.Wait()
+		for _, f := range files {
+			f.Close()
+		}
+		if err := att.Close(); err != nil {
+			logger.Error("closing attachment", "err", err)
+		}
+		if err := det.Close(); err != nil {
+			logger.Error("closing detector", "err", err)
+		}
+	}()
+
+	// closeOnDone closes a ringbuf reader when ctx is cancelled so the blocking
+	// Read() in its loop returns immediately (the pattern recommended by
+	// cilium/ebpf for clean exit).
+	closeOnDone := func(rd *ringbuf.Reader) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-ctx.Done()
+			rd.Close()
+		}()
+	}
+
+	// The attach path runs alongside the detector. If it dies on its own, the
+	// detector would keep running on stale maps, so it cancels the daemon.
+	attachErr := make(chan error, 1)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		err := runAttachLoop(ctx, logger, att, newNamespaceResolver(*ciliumSocket), allowedNS)
+		if err != nil {
+			attachErr <- err
+			cancel()
+		}
+	}()
 
 	if err := det.seedPrevTotal(); err != nil {
 		return fmt.Errorf("seeding prev_total: %w", err)
 	}
-
 	if err := det.armTimer(); err != nil {
 		return fmt.Errorf("arming timer: %w", err)
 	}
@@ -91,8 +172,8 @@ func run(logger *slog.Logger) error {
 	if params.HDrain != nil {
 		hDrainMode = "static"
 	}
-
-	logger.Info("cusum detector armed",
+	logger.Info("burst detector armed",
+		"namespaces", *namespacesFlag,
 		"mu0", uint64OrDefault(params.Mu0),
 		"k", uint64OrDefault(params.K),
 		"h_onset", uint64OrDefault(params.HOnset),
@@ -107,25 +188,12 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return fmt.Errorf("creating burst event ringbuf reader: %w", err)
 	}
-	defer rd.Close()
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-
-	// Close the ringbuf reader on shutdown signal so the blocking Read() in
-	// the event loop returns immediately. This is the pattern recommended by
-	// cilium/ebpf for clean exit.
-	go func() {
-		<-ctx.Done()
-		rd.Close()
-	}()
-
-	var wg sync.WaitGroup
+	closeOnDone(rd)
 
 	var onEvent func(BurstEvent)
 	if *attributionOut != "" {
 		interval, err := deriveSnapshotInterval(*snapshotInterval, det.windowNs)
 		if err != nil {
-			stop()
 			return fmt.Errorf("deriving snapshot interval: %w", err)
 		}
 		depth := computeRingDepth(*ringRetention, interval)
@@ -138,19 +206,17 @@ func run(logger *slog.Logger) error {
 
 		flowReader, err := newBPFFlowStatsReader(det.objs.FlowStats)
 		if err != nil {
-			stop()
 			return fmt.Errorf("creating flow stats reader: %w", err)
 		}
 		ring := newFlowRing(flowReader, depth)
 
 		attrOutF, err := os.Create(*attributionOut)
 		if err != nil {
-			stop()
 			return fmt.Errorf("opening attribution output %q: %w", *attributionOut, err)
 		}
-		defer attrOutF.Close()
+		files = append(files, attrOutF)
 
-		anchor, anchorErr := walltime.Now()
+		anchor, anchorErr := newWallAnchor()
 		if anchorErr != nil {
 			logger.Warn("failed to capture wall-clock anchor; attribution _utc fields will be empty", "err", anchorErr)
 		}
@@ -224,24 +290,17 @@ func run(logger *slog.Logger) error {
 		if *sampleCSV != "" {
 			f, err := os.Create(*sampleCSV)
 			if err != nil {
-				stop()
 				return fmt.Errorf("opening sample CSV file %q: %w", *sampleCSV, err)
 			}
-			defer f.Close()
+			files = append(files, f)
 			csvOut = f
 		}
 
 		srd, err := ringbuf.NewReader(det.objs.WindowSamples)
 		if err != nil {
-			stop()
 			return fmt.Errorf("creating window sample ringbuf reader: %w", err)
 		}
-		defer srd.Close()
-
-		go func() {
-			<-ctx.Done()
-			srd.Close()
-		}()
+		closeOnDone(srd)
 
 		wg.Add(1)
 		go func() {
@@ -258,21 +317,24 @@ func run(logger *slog.Logger) error {
 	if *eventCSV != "" {
 		f, err := os.Create(*eventCSV)
 		if err != nil {
-			stop()
-			wg.Wait()
 			return fmt.Errorf("opening event CSV file %q: %w", *eventCSV, err)
 		}
-		defer f.Close()
+		files = append(files, f)
 		logger.Info("logging burst events to CSV", "path", *eventCSV)
 		eventErr = eventLogLoop(logger, f, rd, onEvent)
 	} else {
 		eventErr = eventLoop(logger, rd, onEvent)
 	}
 
-	// Cancel context so the srd closer goroutine fires and sampleLoop unblocks.
-	stop()
-	wg.Wait()
-
+	// The event loop returns once ctx is cancelled (reader closed), whether by
+	// a signal, a fatal attach error, or a ringbuf failure. Prefer the attach
+	// error: it is the root cause when it triggered the shutdown.
+	cancel()
+	select {
+	case err := <-attachErr:
+		return fmt.Errorf("attach loop: %w", err)
+	default:
+	}
 	if eventErr != nil && !errors.Is(eventErr, ringbuf.ErrClosed) {
 		return eventErr
 	}
@@ -298,7 +360,7 @@ func windowOrDefault(p *uint64) any {
 }
 
 func eventLoop(logger *slog.Logger, rd *ringbuf.Reader, onEvent func(BurstEvent)) error {
-	anchor, anchorErr := walltime.Now()
+	anchor, anchorErr := newWallAnchor()
 	if anchorErr != nil {
 		logger.Warn("failed to capture wall-clock anchor; change_point_utc will be empty", "err", anchorErr)
 	}

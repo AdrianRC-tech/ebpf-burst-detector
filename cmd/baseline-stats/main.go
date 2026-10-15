@@ -27,7 +27,7 @@ func main() {
 }
 
 func run(logger *slog.Logger) error {
-	samplesCSV := flag.String("samples-csv", "", "window samples CSV from cusum-detector --sample-windows (required)")
+	samplesCSV := flag.String("samples-csv", "", "window samples CSV from burst-detector --sample-windows (required)")
 	dropWarmup := flag.Int("drop-warmup", 1, "leading rows to drop; first delta is computed against prev_total=0 and is garbage")
 	kMult := flag.Float64("k-mult", 0.5, "slack multiplier: k = k-mult × σ̂")
 	hMult := flag.Float64("h-mult", 4.0, "threshold multiplier: h = h-mult × σ̂")

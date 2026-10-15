@@ -9,8 +9,6 @@ import (
 	"strconv"
 
 	"github.com/cilium/ebpf/ringbuf"
-
-	"github.com/AdrianRC-tech/ebpf-burst-detector/internal/walltime"
 )
 
 // eventLogLoop reads burst_events from rd and writes one CSV row per event to w.
@@ -20,7 +18,7 @@ func eventLogLoop(logger *slog.Logger, w io.Writer, rd *ringbuf.Reader, onEvent 
 	cw := csv.NewWriter(w)
 	defer cw.Flush()
 
-	anchor, anchorErr := walltime.Now()
+	anchor, anchorErr := newWallAnchor()
 	if anchorErr != nil {
 		logger.Warn("failed to capture wall-clock anchor; change_point_utc column will be empty", "err", anchorErr)
 	}

@@ -25,16 +25,3 @@ func readTotal(m *ebpf.Map) (uint64, error) {
 	}
 	return total, nil
 }
-
-// activeCPUs returns the number of per-CPU slots that have observed any
-// traffic. Diagnostic-only — a surprisingly-low count under load usually
-// signals an IRQ-affinity or NIC-RSS quirk worth investigating.
-func activeCPUs(perCPU []uint64) int {
-	n := 0
-	for _, v := range perCPU {
-		if v > 0 {
-			n++
-		}
-	}
-	return n
-}

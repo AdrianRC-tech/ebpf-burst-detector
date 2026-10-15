@@ -10,8 +10,6 @@ import (
 	"strconv"
 
 	"github.com/cilium/ebpf/ringbuf"
-
-	"github.com/AdrianRC-tech/ebpf-burst-detector/internal/walltime"
 )
 
 const windowSampleSize = 24
@@ -37,7 +35,7 @@ func sampleLoop(logger *slog.Logger, w io.Writer, rd *ringbuf.Reader) error {
 	cw := csv.NewWriter(w)
 	defer cw.Flush()
 
-	anchor, anchorErr := walltime.Now()
+	anchor, anchorErr := newWallAnchor()
 	if anchorErr != nil {
 		logger.Warn("failed to capture wall-clock anchor; time_utc column will be empty", "err", anchorErr)
 	}

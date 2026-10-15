@@ -437,8 +437,7 @@ CLAUDE.md
 .worktrees/
 
 # Compiled Go binaries (build artifacts)
-/ingress-counter
-/cusum-detector
+/burst-detector
 
 # Specs
 docs/superpowers/specs/
@@ -448,21 +447,11 @@ docs/*
 !docs/design-decisions-layer1-to-layer2-interface.md
 
 # Burst Detector — generated artifacts
-## BPF objetcs for ingress byte counter and burst detection
-/cmd/ingress-counter/bpf_bpfel.go
-/cmd/ingress-counter/bpf_bpfel.o
-/cmd/ingress-counter/bpf_bpfeb.go
-/cmd/ingress-counter/bpf_bpfeb.o
-/cmd/cusum-detector/bpf_bpfel.go
-/cmd/cusum-detector/bpf_bpfel.o
-/cmd/cusum-detector/bpf_bpfeb.go
-/cmd/cusum-detector/bpf_bpfeb.o
-
-##  BPF objects for flow characterization
-/cmd/ingress-counter/flow_bpfel.go
-/cmd/ingress-counter/flow_bpfel.o
-/cmd/ingress-counter/flow_bpfeb.go
-/cmd/ingress-counter/flow_bpfeb.o
+## bpf2go output (counter, flow, cusum prefixes)
+/cmd/burst-detector/*_bpfel.go
+/cmd/burst-detector/*_bpfel.o
+/cmd/burst-detector/*_bpfeb.go
+/cmd/burst-detector/*_bpfeb.o
 
 # Modified version of hotelReservation - DeathStarBench
 /benchmark/

@@ -16,8 +16,6 @@ import (
 
 	"github.com/cilium/ebpf"
 	"golang.org/x/sys/unix"
-
-	"github.com/AdrianRC-tech/ebpf-burst-detector/internal/walltime"
 )
 
 // attributionRecord is one NDJSON record per burst, listing the flows that
@@ -124,7 +122,7 @@ func deltaBetween(from flowVal, fromOK bool, to flowVal) flowDelta {
 // every flow seen, uncapped. Ties break on skbs (desc), then src, dst.
 func score(s0, s1 snapshot, topN int) attributionRecord {
 	evictedFlows := 0
-	s0.all(func(key bpfFlowKey, _ flowVal) {
+	s0.all(func(key cusumFlowKey, _ flowVal) {
 		if _, ok := s1.value(key); !ok {
 			evictedFlows++
 		}
@@ -132,7 +130,7 @@ func score(s0, s1 snapshot, topN int) attributionRecord {
 
 	var totalBytes uint64
 	contributors := make([]contributor, 0, 64)
-	s1.all(func(key bpfFlowKey, v1 flowVal) {
+	s1.all(func(key cusumFlowKey, v1 flowVal) {
 		v0, v0OK := s0.value(key)
 		burst := deltaBetween(v0, v0OK, v1)
 		totalBytes += burst.bytes
@@ -220,7 +218,7 @@ func computeRingDepth(retention, interval time.Duration) int {
 }
 
 // monotonicNowNs reads CLOCK_MONOTONIC, the same clock bpf_ktime_get_ns and
-// internal/walltime use, as a nanosecond timestamp comparable to ring
+// walltime.go use, as a nanosecond timestamp comparable to ring
 // snapshot stamps and BurstEvent timestamps.
 func monotonicNowNs() uint64 {
 	var ts unix.Timespec
@@ -320,7 +318,7 @@ type attributionState struct {
 	writeMu sync.Mutex
 	writer  recordWriter
 
-	anchor    walltime.Anchor
+	anchor    wallAnchor
 	anchorErr error
 
 	logger *slog.Logger
