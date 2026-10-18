@@ -335,7 +335,7 @@ increment `delta − mu_0 − k` was strictly positive and therefore `delta > mu
 `(delta > mu_0)` ternary at the onset transition in `cusum_detector.bpf.c` is dead code for any
 valid configuration. The only ways in are misconfiguration — `h_onset == 0`, or `k == 0` with
 `delta == mu_0 + 1` where integer division floors to `0`. Both are rejected at load time in the Go
-loader (`deriveHSlackMult` in `cmd/cusum-detector/loader.go`) rather than defended against on the
+loader (`deriveHSlackMult` in `cmd/burst-detector/detector.go`) rather than defended against on the
 timer path.
 
 ---

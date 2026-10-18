@@ -3,6 +3,9 @@
 ##
 ## Get latest from https://github.com/github/gitignore/blob/main/VisualStudio.gitignore
 
+#venv
+.venv/
+
 # User-specific files
 *.rsuser
 *.suo
@@ -464,3 +467,6 @@ wrk2/
 
 # Notes
 execution-planning.md
+own-notes.md
+*.svg
+*.tex

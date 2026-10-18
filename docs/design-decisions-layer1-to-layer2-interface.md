@@ -80,7 +80,7 @@ field re-arms on every zero-valued window, so "last zero" is maintained without 
 runs in the 10 Hz timer, never in the ≥ 1 Mpps data path.
 
 **Cost.** The ring buffer event layout changes, which is a lockstep change with
-`cmd/cusum-detector/events.go` (`burstEventSize`), `events_test.go` (asserts byte offsets),
+`cmd/burst-detector/events.go` (`burstEventSize`), `events_test.go` (asserts byte offsets),
 `eventlog.go` (CSV column), and regenerated `bpf_bpfel.go`. The offset assertions in
 `events_test.go` are the designed guard for exactly this class of change.
 

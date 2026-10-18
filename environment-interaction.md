@@ -12,7 +12,7 @@ rm -rf /sys/fs/bpf/burst-detector
 /usr/local/bin/burst-detector -mu0 293374 -k 127714 -h-onset 766284 -h-slack-mult 6 -window 100ms --snapshot-interval 100ms -attribution-out tmp/ebpf-burst-detector/7.characterization_layer/attribution.ndjson
 
 # Introduce load 
-k6 run loadgen/k6/bursts.js -e N_BURSTS=5 -e GAP_S=5 -e BURSTY_WINDOW_SIZE_MS=500 -e TAIL_S=0 -e BASELINE_RATE=1000 -e SETTLE_S=10 -e PRE_ALLOC_VUS=3000 -e MAX_VUS=350 -e BURSTY_WINDOW_RPS=2000
+k6 run loadgen/k6/bursts.js -e N_BURSTS=5 -e GAP_S=5 -e BURSTY_WINDOW_SIZE_MS=500 -e TAIL_S=0 -e BASELINE_RATE=1000 -e SETTLE_S=10 -e PRE_ALLOC_VUS=300 -e MAX_VUS=350 -e BURSTY_WINDOW_RPS=2000
 
 # Stop kind cluster
 docker stop $(docker ps -aq --filter "label=io.x-k8s.kind.cluster=burst-detection-lab")
