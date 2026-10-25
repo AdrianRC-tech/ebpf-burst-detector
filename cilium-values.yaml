@@ -11,13 +11,6 @@ loadBalancer:
   mode: dsr # NodePort/LB traffic keeps the client source IP and returns directly to the client instead of SNAT-ing through the node that received it; avoids extra node-to-node hop for reply traffic.
   dsrDispatch: opt
 
-# prometheus:
-#   enabled: true            # cilium-agent metrics on port 9962; pods get prometheus.io/scrape annotation
-
-# operator:
-#   prometheus:
-#     enabled: true          # cilium-operator metrics on port 9963
-
 hubble:
   enabled: true
   relay:

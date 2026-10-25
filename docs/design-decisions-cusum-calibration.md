@@ -162,8 +162,9 @@ magnitude)/2`. This is what makes the detector optimal for that shift. The two s
 shifts of different magnitudes:
 
 - **Onset** detects a shift *up* from `mu_0`. The burst size is unknown at onset, so `k_onset`
-  is set from the *target sensitivity* ("detect bursts ≥ M×baseline" → `k_onset =
-  (M−1)·mu_0 / 2`). A legitimate load-time constant.
+  is **not** derived from `mu_0` or a target burst multiplier; it is a noise-based load-time
+  constant, `k = k-mult × σ̂` (`baseline-stats`, default `k-mult = 0.5`), fixed per window size
+  in `experiments/configs/w<ms>.conf`.
 - **Drain** detects a shift *down* of magnitude `(mu_burst − mu_0)` — a value known **only at
   runtime**. The matched slack is therefore `k_drain = (mu_burst − mu_0) / 2`, computed at the
   onset transition.
@@ -192,9 +193,10 @@ an onset-time-derived value.
 
 ### Onset arm review — verified against the 30-min baseline, no change needed
 
-The onset arm's own calibration rule (`k_onset = (M−1)·mu_0/2` for a target sensitivity of
-detecting bursts ≥ `M`×baseline, from `docs/experiment-methodology.md` §5) looked, on paper, like
-it could disagree with the noise-based rule actually implemented (`k = 1·σ̂`). Checked against
+The sensitivity-based form (`k_onset = (M−1)·mu_0/2` for a target sensitivity of detecting
+bursts ≥ `M`×baseline, from `docs/experiment-methodology.md` §5) is **not** what is implemented;
+it was only a cross-check. It looked, on paper, like it could disagree with the noise-based rule
+actually implemented (`k = k-mult × σ̂`; `k-mult = 1.0` in this review). Checked against
 `tmp/3.experiments_second_iterations/exp2_finetunning_data_csv/30min_baseline_50ms_windows.csv`
 (n = 36,143 quiescent windows): median 67,074, mean 83,542, `σ̂` 71,810, `σ̂/median` ≈ 1.07. This
 corresponds to a baseline of 1.67 MB/s of pod ingress at 100 req/s (DeathStarBench's fan-out
@@ -203,9 +205,9 @@ in evaluation adds another 100 req/s, so `Δ ≈ mu_0` and `δ = Δ/σ̂ ≈ 1.0
 burst, `M = 2`). The sensitivity-based form gives `k_onset = (M−1)·mu_0/2 = mu_0/2 ≈ 33.5k`; the
 noise-based form gives `k = 0.5·σ̂ ≈ 35.9k` (at `k-mult = 1.0`, `k = σ̂`, i.e. `0.5σ̂` is the slack
 half-width). **The two agree to within 7%** — a consequence of `Δ ≈ mu_0 ≈ σ̂` on this workload,
-not a coincidence to be re-litigated. **No onset-side change needed**; the `k_onset` formula in
-`experiment-methodology.md` §5 and the implemented `k = 1·σ̂` rule are the same rule in different
-units for this specific baseline/burst combination.
+not a coincidence to be re-litigated. **No onset-side change needed**; the sensitivity-based form is not
+implemented, and on this specific baseline/burst combination it would give nearly the same value
+as the implemented noise-based `k = k-mult × σ̂`.
 
 The apparent mismatch between onset-triggering window sizes (155k–484k bytes, per
 `docs/conclusions_from_first_experiments.md` §3) and the true burst level (~167k bytes) is

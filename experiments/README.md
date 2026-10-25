@@ -20,3 +20,12 @@ both edges). Coverage 100 with a low IoU means over-extended.
 `configs/w<ms>.conf` holds the calibrated `MU0 K H_ONSET H_SLACK_MULT` (from `baseline-stats`) plus k6 knobs.
 `BURSTY_WINDOW_RPS` is the *extra* rate (peak = baseline + extra). Scoring covers `bursts.js` only;
 `staircase.js` is collected the same way but has no scorer yet.
+
+## Calibrating a new window
+
+```bash
+./experiments/calibrate.sh --window 100ms   # ~70 s; needs bin/baseline-stats and the detector in the node
+```
+Runs the detector in sampling mode under steady k6 load (`BASELINE_RATE`, `SETTLE_S`, ... overridable via env),
+then prints the `baseline-stats` report on stdout (progress goes to stderr). Copy `MU0 K H_ONSET` into
+`configs/w<ms>.conf`. Samples land in `tmp/calibration/w<ms>_windows.csv`.

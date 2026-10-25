@@ -470,3 +470,4 @@ execution-planning.md
 own-notes.md
 *.svg
 *.tex
+figures/**/*.pdf
