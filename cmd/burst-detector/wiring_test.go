@@ -74,14 +74,6 @@ func TestComputeRingDepth(t *testing.T) {
 
 // --- fakes shared by the pairing/watchdog tests below ---
 
-type fakeAnomalyReader struct {
-	parseAnomaly, lruSaturated uint64
-}
-
-func (f *fakeAnomalyReader) read() (uint64, uint64, error) {
-	return f.parseAnomaly, f.lruSaturated, nil
-}
-
 type fakeRecordWriter struct {
 	records []attributionRecord
 }
@@ -95,14 +87,13 @@ type fakeClock struct{ nowNs uint64 }
 
 func (c *fakeClock) now() uint64 { return c.nowNs }
 
-func newTestAttributionState(reader flowStatsReader, clock *fakeClock, anomalies *fakeAnomalyReader, writer *fakeRecordWriter) *attributionState {
+func newTestAttributionState(reader flowStatsReader, clock *fakeClock, writer *fakeRecordWriter) *attributionState {
 	return &attributionState{
-		ring:      newFlowRing(reader, 64),
-		anomalies: anomalies,
-		topN:      10,
-		writer:    writer,
-		logger:    discardLogger(),
-		now:       clock.now,
+		ring:   newFlowRing(reader, 64),
+		topN:   10,
+		writer: writer,
+		logger: discardLogger(),
+		now:    clock.now,
 	}
 }
 
@@ -125,9 +116,8 @@ func TestAttributionStatePairsOnsetAndDrain(t *testing.T) {
 		{{key: f, cpuValues: []cusumFlowStat{{Bytes: 500_000, Skbs: 500, FirstSeenNs: 1}}}}, // s1 poll @2s (drain, fresh sync)
 	}}
 	clock := &fakeClock{}
-	anomalies := &fakeAnomalyReader{parseAnomaly: 5, lruSaturated: 1}
 	writer := &fakeRecordWriter{}
-	s := newTestAttributionState(reader, clock, anomalies, writer)
+	s := newTestAttributionState(reader, clock, writer)
 
 	// Baseline history: a poll at t=0.
 	clock.nowNs = 0
@@ -144,8 +134,6 @@ func TestAttributionStatePairsOnsetAndDrain(t *testing.T) {
 	s.onEvent(onsetEvent(1_000_000_000))
 
 	clock.nowNs = 2_000_000_000
-	anomalies.parseAnomaly = 8
-	anomalies.lruSaturated = 3
 	s.onEvent(drainEvent(1_500_000_000))
 
 	if len(writer.records) != 1 {
@@ -154,12 +142,6 @@ func TestAttributionStatePairsOnsetAndDrain(t *testing.T) {
 	rec := writer.records[0]
 	if rec.Unpaired {
 		t.Error("Unpaired = true, want false")
-	}
-	if rec.ParseAnomalyDelta != 3 {
-		t.Errorf("ParseAnomalyDelta = %d, want 3 (8-5)", rec.ParseAnomalyDelta)
-	}
-	if rec.LruSaturatedDelta != 2 {
-		t.Errorf("LruSaturatedDelta = %d, want 2 (3-1)", rec.LruSaturatedDelta)
 	}
 	if rec.Truncated {
 		t.Error("Truncated = true, want false (onset change point is within the ring)")
@@ -193,7 +175,7 @@ func TestAttributionStateEmitFallsBackToOldestSlotAndSetsTruncated(t *testing.T)
 	}}
 	clock := &fakeClock{}
 	writer := &fakeRecordWriter{}
-	s := newTestAttributionState(reader, clock, &fakeAnomalyReader{}, writer)
+	s := newTestAttributionState(reader, clock, writer)
 	s.ring = newFlowRing(reader, 2) // depth 2: both @1000 and the fresh @2000 poll are retained
 
 	clock.nowNs = 1000
@@ -234,7 +216,7 @@ func TestAttributionStateEmitSerializesWriterAccess(t *testing.T) {
 	}}
 	clock := &fakeClock{}
 	writer := &fakeRecordWriter{}
-	s := newTestAttributionState(reader, clock, &fakeAnomalyReader{}, writer)
+	s := newTestAttributionState(reader, clock, writer)
 
 	clock.nowNs = 1000
 	if err := s.ring.poll(clock.now()); err != nil {
@@ -266,7 +248,7 @@ func TestAttributionStateDrainWithNoPendingOnsetIsIgnored(t *testing.T) {
 	}}
 	clock := &fakeClock{}
 	writer := &fakeRecordWriter{}
-	s := newTestAttributionState(reader, clock, &fakeAnomalyReader{}, writer)
+	s := newTestAttributionState(reader, clock, writer)
 
 	s.onEvent(drainEvent(1)) // no prior onset
 
@@ -287,7 +269,7 @@ func TestAttributionStateWatchdogEmitsUnpairedAndIgnoresLateDrain(t *testing.T) 
 	}}
 	clock := &fakeClock{}
 	writer := &fakeRecordWriter{}
-	s := newTestAttributionState(reader, clock, &fakeAnomalyReader{}, writer)
+	s := newTestAttributionState(reader, clock, writer)
 
 	clock.nowNs = 0
 	if err := s.ring.poll(clock.now()); err != nil {
@@ -328,7 +310,7 @@ func TestAttributionStateWatchdogDoesNothingBeforeTimeout(t *testing.T) {
 	}}
 	clock := &fakeClock{}
 	writer := &fakeRecordWriter{}
-	s := newTestAttributionState(reader, clock, &fakeAnomalyReader{}, writer)
+	s := newTestAttributionState(reader, clock, writer)
 
 	clock.nowNs = 1_000_000_000
 	s.onEvent(onsetEvent(1_000_000_000))
@@ -358,7 +340,7 @@ func TestAttributionStateEmitLabelsServices(t *testing.T) {
 	}}
 	clock := &fakeClock{}
 	writer := &fakeRecordWriter{}
-	s := newTestAttributionState(reader, clock, &fakeAnomalyReader{}, writer)
+	s := newTestAttributionState(reader, clock, writer)
 	s.resolver = fakeServiceResolver{"1.0.0.0": "default/frontend"} // dst 2.0.0.0 unknown
 
 	clock.nowNs = 1000

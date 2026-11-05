@@ -277,7 +277,6 @@ correctness. Pass `--snapshot-interval` explicitly if you need finer than 50ms.
   "drain_change_point_utc": "12:03:46.800000000",
   "total_bytes": 820000, "flows": 4,
   "truncated": false, "unpaired": false, "evicted_flows": 0,
-  "parse_anomaly_delta": 0, "lru_saturated_delta": 0,
   "contributors": [
     {"src": "10.0.1.42:41234", "dst": "10.0.2.9:11211", "proto": "tcp",
      "src_service": "default/search", "dst_service": "default/memcached-rate",
@@ -303,12 +302,7 @@ correctness. Pass `--snapshot-interval` explicitly if you need finer than 50ms.
   rather than being dropped, but treat its numbers as a lower bound.
 - **`unpaired: true`** means a burst did not drain within `--ring-retention` (measured from the onset change point, i.e. before its onset slot leaves the ring);
   the record is a partial, best-effort snapshot, not a complete burst window.
-- **`lru_saturated_delta`** reads 0 under ordinary connection churn even if
-  the 8192-entry flow table is thrashing — an LRU map evicts rather than
-  fails on insert. `evicted_flows` (count of flows present at onset but gone
-  by drain) is the more useful churn signal; treat a nonzero
-  `lru_saturated_delta` as a sign of deeper trouble (e.g. per-CPU free-list
-  exhaustion), not the absence of one as "no thrashing".
+- **`evicted_flows`** (flows present at onset but gone by drain) is the churn signal for the 8192-entry LRU flow table; non-IPv4 skbs are not attributed (compare `total_bytes` with the node-wide counter delta).
 - Sources are **raw IPs** in this iteration — naming them (pod/workload) is a
   later increment (spec §6, not yet built); see `CLAUDE.md`'s Phase 2 note.
 
@@ -402,7 +396,7 @@ sudo go test ./cmd/burst-detector/ -v
 
 This covers `ingress_counter` (TCX chaining, byte counting) and
 `flow_counter` (per-flow parsing, the map-insert race, the non-first-fragment
-and IPv6-parse-anomaly cases) — the privileged `BPF_PROG_TEST_RUN` tests. Each loads a
+and non-IPv4 cases) — the privileged `BPF_PROG_TEST_RUN` tests. Each loads a
 **fresh, unpinned** copy of the BPF object (`LoadAndAssign` with every map's
 `Pinning` cleared) so tests never depend on run order or a prior pinned
 state at `/sys/fs/bpf/burst-detector`.

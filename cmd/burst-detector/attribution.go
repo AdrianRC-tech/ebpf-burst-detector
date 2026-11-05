@@ -14,7 +14,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cilium/ebpf"
 	"golang.org/x/sys/unix"
 )
 
@@ -22,9 +21,9 @@ import (
 // carried the most burst-window bytes. score fills in the snapshot-derived
 // fields (TotalBytes/Flows/EvictedFlows/Contributors); the
 // event-derived fields (onset/drain change points as _utc
-// strings, Truncated, Unpaired, and the flow_anomalies deltas) are set by
-// the caller in main.go, which has the BurstEvent pair and the pinned
-// FlowAnomalies map that score has no access to. Service names on the
+// strings, Truncated, Unpaired) are set by
+// the caller in main.go, which has the BurstEvent pair that score has no
+// access to. Service names on the
 // contributors are filled in by emit via the serviceResolver.
 type attributionRecord struct {
 	OnsetChangePointUTC string `json:"onset_change_point_utc,omitempty"`
@@ -35,17 +34,9 @@ type attributionRecord struct {
 	TotalBytes uint64 `json:"total_bytes"`
 	Flows      int    `json:"flows"`
 
-	Truncated         bool   `json:"truncated"`
-	Unpaired          bool   `json:"unpaired"`
-	EvictedFlows      int    `json:"evicted_flows"`
-	ParseAnomalyDelta uint64 `json:"parse_anomaly_delta"`
-	// LruSaturatedDelta is a narrower signal than its name suggests: an LRU
-	// map insert past capacity evicts rather than fails, so this stays 0
-	// under ordinary connection churn. EvictedFlows is the practical churn
-	// signal; treat a nonzero LruSaturatedDelta as evidence of deeper
-	// trouble (e.g. per-CPU free-list exhaustion), not as "no thrashing"
-	// when it reads 0. See shared_maps.h's flow_anomalies comment.
-	LruSaturatedDelta uint64 `json:"lru_saturated_delta"`
+	Truncated    bool `json:"truncated"`
+	Unpaired     bool `json:"unpaired"`
+	EvictedFlows int  `json:"evicted_flows"`
 
 	Contributors []contributor `json:"contributors"`
 }
@@ -228,47 +219,6 @@ func monotonicNowNs() uint64 {
 	return uint64(ts.Nano())
 }
 
-// anomalyReader abstracts one read of the flow_anomalies counters (summed
-// across CPUs), so attributionState's pairing logic can be tested without a
-// real BPF map.
-type anomalyReader interface {
-	read() (parseAnomaly, lruSaturated uint64, err error)
-}
-
-// bpfAnomalyReader reads objs.FlowAnomalies: idx 0 = parse_anomaly, idx 1 =
-// lru_saturated.
-type bpfAnomalyReader struct {
-	m *ebpf.Map
-}
-
-func newBPFAnomalyReader(m *ebpf.Map) *bpfAnomalyReader {
-	return &bpfAnomalyReader{m: m}
-}
-
-func (r *bpfAnomalyReader) read() (uint64, uint64, error) {
-	parseAnomaly, err := sumPerCPUArrayCounter(r.m, 0)
-	if err != nil {
-		return 0, 0, fmt.Errorf("reading flow_anomalies[parse_anomaly]: %w", err)
-	}
-	lruSaturated, err := sumPerCPUArrayCounter(r.m, 1)
-	if err != nil {
-		return 0, 0, fmt.Errorf("reading flow_anomalies[lru_saturated]: %w", err)
-	}
-	return parseAnomaly, lruSaturated, nil
-}
-
-func sumPerCPUArrayCounter(m *ebpf.Map, idx uint32) (uint64, error) {
-	var perCPU []uint64
-	if err := m.Lookup(idx, &perCPU); err != nil {
-		return 0, err
-	}
-	var total uint64
-	for _, v := range perCPU {
-		total += v
-	}
-	return total, nil
-}
-
 // recordWriter abstracts writing one attributionRecord, so attributionState's
 // pairing/watchdog logic can be tested without a real output file.
 type recordWriter interface {
@@ -287,13 +237,9 @@ func (w *jsonRecordWriter) write(rec attributionRecord) error {
 	return w.enc.Encode(rec)
 }
 
-// pendingOnset is a burst onset waiting for its drain, plus the
-// flow_anomalies counters read at onset time so emit can compute the
-// burst-window deltas.
+// pendingOnset is a burst onset waiting for its drain.
 type pendingOnset struct {
-	ev            BurstEvent
-	parseAnomaly0 uint64
-	lruSaturated0 uint64
+	ev BurstEvent
 }
 
 // attributionState owns the flow snapshot ring and the onset/drain pairing
@@ -306,10 +252,9 @@ type attributionState struct {
 	mu      sync.Mutex
 	pending *pendingOnset
 
-	ring      *flowRing
-	anomalies anomalyReader
-	resolver  serviceResolver
-	topN      int
+	ring     *flowRing
+	resolver serviceResolver
+	topN     int
 
 	// writeMu serializes calls to writer.write, kept separate from mu (which
 	// guards pending-onset state only) because a real drain and a watchdog
@@ -333,12 +278,8 @@ type attributionState struct {
 func (s *attributionState) onEvent(ev BurstEvent) {
 	switch ev.Type {
 	case EventOnset:
-		pa, ls, err := s.anomalies.read()
-		if err != nil {
-			s.logger.Warn("reading flow_anomalies at onset", "err", err)
-		}
 		s.mu.Lock()
-		s.pending = &pendingOnset{ev: ev, parseAnomaly0: pa, lruSaturated0: ls}
+		s.pending = &pendingOnset{ev: ev}
 		s.mu.Unlock()
 
 	case EventDrain:
@@ -402,7 +343,7 @@ func (s *attributionState) checkWatchdog(timeout time.Duration) {
 }
 
 // emit resolves s0/s1 against the ring, scores the burst, fills in
-// the event/anomaly/flag fields score cannot derive on its own, and writes
+// the event/flag fields score cannot derive on its own, and writes
 // the record.
 func (s *attributionState) emit(pending *pendingOnset, drain BurstEvent, s1Stamp uint64, unpaired bool) {
 	t0 := pending.ev.ChangePointNs
@@ -439,29 +380,12 @@ func (s *attributionState) emit(pending *pendingOnset, drain BurstEvent, s1Stamp
 	rec.Truncated = truncated
 	rec.Unpaired = unpaired
 
-	parseAnomaly1, lruSaturated1, err := s.anomalies.read()
-	if err != nil {
-		s.logger.Warn("reading flow_anomalies at drain", "err", err)
-	} else {
-		rec.ParseAnomalyDelta = subGuard(parseAnomaly1, pending.parseAnomaly0)
-		rec.LruSaturatedDelta = subGuard(lruSaturated1, pending.lruSaturated0)
-	}
-
 	s.writeMu.Lock()
-	err = s.writer.write(rec)
+	err := s.writer.write(rec)
 	s.writeMu.Unlock()
 	if err != nil {
 		s.logger.Warn("writing attribution record", "err", err)
 	}
-}
-
-// subGuard is a-b, clamped to 0 — flow_anomalies counters are monotonic
-// within one process lifetime, but guard against surprises anyway.
-func subGuard(a, b uint64) uint64 {
-	if a < b {
-		return 0
-	}
-	return a - b
 }
 
 // resolveServices fills src_service/dst_service on the (already top-N

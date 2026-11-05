@@ -169,7 +169,7 @@ func makeIPv4Packet(proto uint8, srcIP, dstIP [4]byte, srcPort, dstPort uint16, 
 // in the top nibble). flow_counter never branches on ethertype — it reads
 // the would-be IP header's version nibble directly, and IPv4/IPv6 share the
 // same bit position for that field, so this alone must trip the
-// version != 4 parse-anomaly branch.
+// version != 4 branch.
 func makeIPv6EthertypePacket(total int) []byte {
 	const minLen = 14 + 20
 	if total < minLen {
@@ -340,21 +340,13 @@ func TestFlowCounterFlows(t *testing.T) {
 	}
 }
 
-// TestFlowCounterIPv6IsParseAnomaly: flow_counter branches on the parsed
-// IP version, not on skb->protocol, so a would-be IPv6 packet must trip
-// parse_anomaly (flow_anomalies[0]) and never create a flow_stats entry.
-func TestFlowCounterIPv6IsParseAnomaly(t *testing.T) {
+// TestFlowCounterIPv6IsIgnored: flow_counter branches on the parsed IP
+// version, not on skb->protocol, so a would-be IPv6 packet must never create
+// a flow_stats entry.
+func TestFlowCounterIPv6IsIgnored(t *testing.T) {
 	objs := loadFlowTestObjects(t)
 
 	runFlowCounter(t, objs, makeIPv6EthertypePacket(60))
-
-	total, err := sumPerCPUCounter(objs.FlowAnomalies, 0)
-	if err != nil {
-		t.Fatalf("sumPerCPUCounter(parse_anomaly): %v", err)
-	}
-	if total != 1 {
-		t.Errorf("parse_anomaly = %d, want 1", total)
-	}
 
 	it := objs.FlowStats.Iterate()
 	var k flowFlowKey

@@ -230,7 +230,6 @@ func run(logger *slog.Logger) error {
 
 		attrState := &attributionState{
 			ring:      ring,
-			anomalies: newBPFAnomalyReader(det.objs.FlowAnomalies),
 			resolver:  newCiliumResolver(*ciliumSocket, logger),
 			topN:      *topN,
 			writer:    newJSONRecordWriter(attrOutF),
