@@ -229,6 +229,20 @@ func (r *flowRing) at(t uint64) (snapshot, bool) {
 	return snapshot{stampNs: s.stampNs, index: r.index, values: s.values}, true
 }
 
+// after returns the oldest retained slot with stamp >= t, as a snapshot. ok
+// is false when t is newer than every retained slot or the ring is empty.
+func (r *flowRing) after(t uint64) (snapshot, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	i := sort.Search(len(r.slots), func(i int) bool { return r.slots[i].stampNs >= t })
+	if i == len(r.slots) {
+		return snapshot{}, false
+	}
+	s := r.slots[i]
+	return snapshot{stampNs: s.stampNs, index: r.index, values: s.values}, true
+}
+
 // oldest returns the oldest retained slot as a snapshot, for the truncation
 // fallback in spec §5: when at(t0) reports t0 precedes every retained slot,
 // the caller uses the oldest slot as s0 anyway (rather than dropping the

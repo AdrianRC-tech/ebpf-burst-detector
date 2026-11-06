@@ -38,7 +38,17 @@ type attributionRecord struct {
 	Unpaired     bool `json:"unpaired"`
 	EvictedFlows int  `json:"evicted_flows"`
 
+	// SnapshotsUsed are the stamps of the snapshots that bounded the window
+	// (s0 and s1), same format as the change points. Omitted without a
+	// wall-clock anchor.
+	SnapshotsUsed *snapshotsUsed `json:"timestamp_snapshots_used,omitempty"`
+
 	Contributors []contributor `json:"contributors"`
+}
+
+type snapshotsUsed struct {
+	StartUTC string `json:"start_utc"`
+	EndUTC   string `json:"end_utc"`
 }
 
 // contributor is one flow's burst-window contribution, identified by its
@@ -173,8 +183,9 @@ func score(s0, s1 snapshot, topN int) attributionRecord {
 // otherwise put depth in the hundreds and the ring's memory in the hundreds
 // of MB per node. score reads each snapshot's actual stamp, never the nominal
 // interval, so a coarser default poll cadence than the CUSUM window doesn't
-// corrupt the math — only the ring's temporal resolution. An explicit --snapshot-interval always wins over this floor,
-// same as every other flag in this codebase.
+// corrupt the math — only the ring's temporal resolution. An explicit
+// --snapshot-interval always wins over this floor, but memory needs
+// attention: 10ms with the default 3s retention holds 300 slots, not 60.
 const minDefaultSnapshotInterval = 50 * time.Millisecond
 
 // deriveSnapshotInterval resolves the flow-ring poll interval: an explicit
@@ -272,8 +283,8 @@ type attributionState struct {
 
 // onEvent is the callback eventLoop/eventLogLoop invoke for every decoded
 // burst_event. An onset stores the pending state; a drain takes a fresh
-// synchronous ring snapshot (spec correction 5 — the newest polled slot can
-// be up to one poll interval stale) and, if a pending onset exists, scores
+// synchronous ring snapshot (guarantees a slot at or after the drain change
+// point for emit's after() lookup) and, if a pending onset exists, scores
 // and emits a record.
 func (s *attributionState) onEvent(ev BurstEvent) {
 	switch ev.Type {
@@ -342,7 +353,9 @@ func (s *attributionState) checkWatchdog(timeout time.Duration) {
 	s.emit(pending, BurstEvent{}, nowNs, true)
 }
 
-// emit resolves s0/s1 against the ring, scores the burst, fills in
+// emit resolves s0/s1 against the ring (s0: newest slot at or before the
+// onset change point; s1: first slot at or after the drain change point, or
+// s1Stamp for an unpaired record), scores the burst, fills in
 // the event/flag fields score cannot derive on its own, and writes
 // the record.
 func (s *attributionState) emit(pending *pendingOnset, drain BurstEvent, s1Stamp uint64, unpaired bool) {
@@ -361,7 +374,12 @@ func (s *attributionState) emit(pending *pendingOnset, drain BurstEvent, s1Stamp
 		}
 	}
 
-	s1, ok := s.ring.at(s1Stamp)
+	var s1 snapshot
+	if unpaired {
+		s1, ok = s.ring.at(s1Stamp)
+	} else if s1, ok = s.ring.after(drain.ChangePointNs); !ok {
+		s1, ok = s.ring.at(s1Stamp)
+	}
 	if !ok {
 		// The synchronous poll onEvent/checkWatchdog just took must be the
 		// newest slot; this is defensive, not expected to trigger.
@@ -375,6 +393,10 @@ func (s *attributionState) emit(pending *pendingOnset, drain BurstEvent, s1Stamp
 		rec.OnsetChangePointUTC = s.anchor.WallClockString(pending.ev.ChangePointNs)
 		if !unpaired {
 			rec.DrainChangePointUTC = s.anchor.WallClockString(drain.ChangePointNs)
+		}
+		rec.SnapshotsUsed = &snapshotsUsed{
+			StartUTC: s.anchor.WallClockString(s0.stampNs),
+			EndUTC:   s.anchor.WallClockString(s1.stampNs),
 		}
 	}
 	rec.Truncated = truncated

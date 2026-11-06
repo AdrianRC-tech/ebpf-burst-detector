@@ -58,7 +58,7 @@ func run(logger *slog.Logger) error {
 	eventCSV := flag.String("event-csv", "", "path to write onset/drain events as CSV for offline latency analysis (default: slog to stderr)")
 	attributionOut := flag.String("attribution-out", "", "path to write one NDJSON burst attribution record per drain (default: attribution disabled)")
 	ringRetention := flag.Duration("ring-retention", 3*time.Second, "how far back the flow snapshot ring retains history; must cover onset change point to drain, longer bursts are marked truncated")
-	snapshotInterval := flag.Duration("snapshot-interval", 0, "interval between flow snapshots (default: the effective CUSUM window)")
+	snapshotInterval := flag.Duration("snapshot-interval", 0, "interval between flow snapshots (default: the effective CUSUM window, floored at 50ms; smaller values grow ring memory, depth = retention/interval)")
 	topN := flag.Int("top-n", 25, "maximum contributors to include per attribution record")
 	flag.Parse()
 

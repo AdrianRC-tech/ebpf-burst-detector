@@ -1,8 +1,11 @@
 package main
 
 import (
+	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -352,5 +355,64 @@ func TestAttributionStateEmitLabelsServices(t *testing.T) {
 	c := writer.records[0].Contributors[0]
 	if c.SrcService != "default/frontend" || c.DstService != "" {
 		t.Errorf("services = %q / %q, want default/frontend / empty", c.SrcService, c.DstService)
+	}
+}
+
+// A drain whose change point precedes the fresh poll ends the window at the
+// first slot at or after the change point, so bytes of a flow that only
+// appears later are excluded; the record states the snapshots used.
+func TestAttributionStateDrainEndsAtSnapshotAfterChangePoint(t *testing.T) {
+	a, b := fk(1, 100, 1111, 80), fk(2, 100, 2222, 80)
+	type entry = struct {
+		key       cusumFlowKey
+		cpuValues []cusumFlowStat
+	}
+	st := func(n uint64) []cusumFlowStat { return []cusumFlowStat{{Bytes: n, Skbs: 1, FirstSeenNs: 1}} }
+	reader := &fakeFlowStatsReader{calls: [][]entry{
+		{{a, st(100)}},                  // @1s (s0)
+		{{a, st(300)}},                  // @2s (first slot >= change point)
+		{{a, st(300)}, {b, st(50_000)}}, // @3s fresh poll: b only appears here
+	}}
+	clock := &fakeClock{}
+	writer := &fakeRecordWriter{}
+	s := newTestAttributionState(reader, clock, writer)
+	anchor, err := newWallAnchor()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.anchor = anchor
+
+	for _, ns := range []uint64{1_000_000_000, 2_000_000_000} {
+		clock.nowNs = ns
+		if err := s.ring.poll(ns); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s.onEvent(onsetEvent(1_000_000_000))
+	clock.nowNs = 3_000_000_000
+	s.onEvent(drainEvent(1_800_000_000))
+
+	rec := writer.records[0]
+	if rec.TotalBytes != 200 || rec.Flows != 1 {
+		t.Errorf("TotalBytes = %d Flows = %d, want 200, 1 (flow b excluded)", rec.TotalBytes, rec.Flows)
+	}
+	if rec.SnapshotsUsed == nil ||
+		rec.SnapshotsUsed.StartUTC != anchor.WallClockString(1_000_000_000) ||
+		rec.SnapshotsUsed.EndUTC != anchor.WallClockString(2_000_000_000) {
+		t.Errorf("SnapshotsUsed = %+v", rec.SnapshotsUsed)
+	}
+	line, _ := json.Marshal(rec)
+	if i, j := strings.Index(string(line), "timestamp_snapshots_used"), strings.Index(string(line), `"contributors"`); i < 0 || i > j {
+		t.Errorf("timestamp_snapshots_used not before contributors: %s", line)
+	}
+
+	// No wall-clock anchor: the object is omitted.
+	s.anchorErr = errors.New("no anchor")
+	reader.i = 0
+	clock.nowNs = 4_000_000_000
+	s.onEvent(onsetEvent(1_000_000_000))
+	s.onEvent(drainEvent(1_800_000_000))
+	if got := writer.records[1]; got.SnapshotsUsed != nil {
+		t.Errorf("SnapshotsUsed = %+v, want nil without anchor", got.SnapshotsUsed)
 	}
 }

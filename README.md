@@ -258,7 +258,7 @@ One NDJSON line is appended to that file per burst, at drain time. Flags:
 | `--attribution-out` | *(empty — disabled)* | path to the NDJSON output file; attribution only runs when this is set |
 | `--cilium-socket` | `/var/run/cilium/cilium.sock` | Cilium agent API socket used to label flows with service names; must be visible in the node container (this is the same flag the attach path uses). If unreachable, records omit `src_service`/`dst_service` |
 | `--ring-retention` | `3s` | how far back the in-memory flow-snapshot ring keeps history; must span onset change point → drain, so a longer burst gets `truncated: true` |
-| `--snapshot-interval` | the effective `--window` (floored at 50ms) | how often the flow counter map is polled into the ring |
+| `--snapshot-interval` | the effective `--window` (floored at 50ms) | how often the flow counter map is polled into the ring. The floor bounds ring memory (`depth = retention / interval`); an explicit smaller value wins, but e.g. 10ms with the default 3s retention holds 300 slots instead of 60 |
 | `--top-n` | `25` | max flows listed per record (`flows`/`total_bytes` are never capped, only the list) |
 
 A shorter `--window` (e.g. the 5–25ms windows used in `tmp/6.layer_1_validations`)
@@ -271,10 +271,13 @@ correctness. Pass `--snapshot-interval` explicitly if you need finer than 50ms.
 
 ### Reading a record
 
+`timestamp_snapshots_used` gives the stamps of the two snapshots that bounded the window: the newest at or before the onset change point, and the first at or after the drain change point (so each edge is off by at most one snapshot interval). Omitted when the wall-clock anchor failed.
+
 ```json
 {
   "onset_change_point_utc": "12:03:45.100000000",
   "drain_change_point_utc": "12:03:46.800000000",
+  "timestamp_snapshots_used": {"start_utc": "12:03:45.050000000", "end_utc": "12:03:46.850000000"},
   "total_bytes": 820000, "flows": 4,
   "truncated": false, "unpaired": false, "evicted_flows": 0,
   "contributors": [

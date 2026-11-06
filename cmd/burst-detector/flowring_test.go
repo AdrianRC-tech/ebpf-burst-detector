@@ -324,3 +324,30 @@ func TestFlowRingAbsentKeyIsNotOK(t *testing.T) {
 		t.Error("value(key never seen): ok = true, want false")
 	}
 }
+
+func TestFlowRingAfterReturnsOldestSlotAtOrAfterT(t *testing.T) {
+	r := newFlowRing(nil, 4)
+	if _, ok := r.after(0); ok {
+		t.Fatal("after on empty ring: ok = true, want false")
+	}
+	type calls = [][]struct {
+		key       cusumFlowKey
+		cpuValues []cusumFlowStat
+	}
+	reader := &fakeFlowStatsReader{calls: calls{
+		{{key: key(1), cpuValues: []cusumFlowStat{{Bytes: 1, Skbs: 1, FirstSeenNs: 1}}}},
+	}}
+	for _, st := range []uint64{100, 200, 300} {
+		mustPoll(t, r, st, reader)
+	}
+	for _, tc := range []struct {
+		t    uint64
+		want uint64
+		ok   bool
+	}{{200, 200, true}, {250, 300, true}, {50, 100, true}, {301, 0, false}} {
+		snap, ok := r.after(tc.t)
+		if ok != tc.ok || (ok && snap.stampNs != tc.want) {
+			t.Errorf("after(%d) = %d, %v; want %d, %v", tc.t, snap.stampNs, ok, tc.want, tc.ok)
+		}
+	}
+}
