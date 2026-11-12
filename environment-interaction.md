@@ -11,6 +11,9 @@ rm -rf /sys/fs/bpf/burst-detector
 # Run whole solution with attribution flow
 /usr/local/bin/burst-detector -mu0 293374 -k 127714 -h-onset 766284 -h-slack-mult 6 -window 100ms --snapshot-interval 100ms -attribution-out tmp/ebpf-burst-detector/7.characterization_layer/attribution.ndjson
 
+# Introduce stable baseline 
+k6 run loadgen/k6/bursts.js -e N_BURSTS=0 -e GAP_S=5 -e BURSTY_WINDOW_SIZE_MS=200 -e TAIL_S=0 -e BASELINE_RATE=2500 -e SETTLE_S=60 -e PRE_ALLOC_VUS=400 -e MAX_VUS=500 -e BURSTY_WINDOW_RPS=2500
+
 # Introduce load 
 k6 run loadgen/k6/bursts.js -e N_BURSTS=5 -e GAP_S=5 -e BURSTY_WINDOW_SIZE_MS=500 -e TAIL_S=0 -e BASELINE_RATE=1000 -e SETTLE_S=10 -e PRE_ALLOC_VUS=300 -e MAX_VUS=350 -e BURSTY_WINDOW_RPS=2000
 
