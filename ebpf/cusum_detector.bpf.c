@@ -14,12 +14,16 @@
 //     truth — Layer 1's architectural output per CLAUDE.md §2 point 7):
 //       0 = quiescent — running upper CUSUM upper_sum to detect burst onset
 //       1 = burst     — running lower CUSUM lower_sum to detect burst drain
-//   - cusum_state holds only the CUSUM accumulators (upper_sum, lower_sum)
-//     and prev_total — no duplicated flag field.
+//   - cusum_state holds the CUSUM accumulators, prev_total and the learned
+//     baseline (n, mu, var) — no duplicated flag field.
+//   - The baseline is learned online (docs/design-decisions-cusum-
+//     calibration.md §7): mu/var via Welford (alpha = 1/n, n <= n_welford)
+//     then EWMA (alpha = 1/ewma_div = W/tau). Onset uses k = sigma and
+//     h_onset = 6 sigma. A window is learned only while quiescent and when
+//     x - mu <= 3 sigma (one-sided gate). A burst held longer than t_max_ns
+//     (= tau) is force-drained (reason = TIMEOUT) and setup re-runs.
 //   - h_drain is derived at the onset transition as h_slack_mult * k_drain
-//     (both arms expressed in the same "slack units" currency — see
-//     docs/design-decisions-cusum-calibration.md §5-6), unless the static
-//     h_drain override is non-zero, in which case that value wins.
+//     (both arms in the same "slack units" currency — §5-6).
 //   - Onset and drain transitions are emitted to burst_events (RINGBUF) for
 //     userspace logging, each carrying a change_point_ns backdated to the
 //     start of the window in which the active arm (upper_sum or lower_sum)
@@ -29,7 +33,7 @@
 //     via Program.Run() to initialise and start the timer.
 //
 // Kernel requirements:
-//   bpf_loop                    ≥ 5.17  (verifier-friendly bounded iteration)
+//   bpf_loop                    ≥ 5.17  (per-CPU sum, isqrt)
 //   bpf_map_lookup_percpu_elem  ≥ 5.13  (read other CPUs' slots)
 //   bpf_timer_*                 ≥ 5.15
 //   BPF_PROG_TYPE_SYSCALL       ≥ 5.18
@@ -39,20 +43,23 @@
 #include "shared_maps.h"
 
 // ---------------------------------------------------------------------------
-// Tunable parameters — set at load time via .rodata constant replacement.
-// Most values are in bytes (mu_0, k, h_onset, h_drain) or nanoseconds
-// (window_ns); h_slack_mult is dimensionless (a threshold expressed in
-// slack units, applied to the drain arm — see docs/design-decisions-
-// cusum-calibration.md §5-6).
+// Parameters — set at load time via .rodata constant replacement.
+// Only window_ns is user-facing; the loader derives ewma_div and t_max_ns
+// from it (tau = max(10 s, 300 * W)). The rest are fixed algorithm constants,
+// volatile const only so tests can override them.
 // ---------------------------------------------------------------------------
 
-volatile const __u64 mu_0          = 1000000;  // baseline bytes per window
-volatile const __u64 k             = 500000;   // slack factor (half the expected step)
-volatile const __u64 h_onset       = 5000000;  // onset threshold
-volatile const __u64 h_drain       = 0;        // static drain threshold override; 0 = derive from h_slack_mult * k_drain
-volatile const __u64 h_slack_mult  = 6;       // drain threshold in slack units (h_drain = h_slack_mult * k_drain); loader always injects a computed value in practice
-volatile const __u64 window_ns     = 100000000; // 100 ms default window
-volatile const __u8  sample_windows = 0;  // 1 = emit per-window byte sample for offline CUSUM tuning
+volatile const __u64 window_ns       = 100000000;   // 100 ms default window
+volatile const __u64 ewma_div        = 300;         // round(tau / W): EWMA alpha = 1/ewma_div once n > n_welford
+volatile const __u64 t_max_ns        = 30000000000; // stuck-burst timeout (= tau)
+volatile const __u64 n_setup         = 30;          // learned windows before detection arms
+volatile const __u64 n_welford       = 300;         // exact Welford (alpha = 1/n) up to here, EWMA after
+volatile const __u64 k_sigma_mult    = 1;           // k = k_sigma_mult * sigma
+volatile const __u64 h_sigma_mult    = 6;           // h_onset = h_sigma_mult * sigma
+volatile const __u64 gate_sigma_mult = 3;           // learn only if x - mu <= gate_sigma_mult * sigma
+volatile const __u64 sigma_floor     = 1500;        // bytes; keeps k/h non-zero on silent traffic
+volatile const __u64 h_slack_mult    = 6;           // drain threshold in slack units (h_drain = h_slack_mult * k_drain)
+volatile const __u8  sample_windows  = 0;           // 1 = emit per-window byte sample for offline analysis
 
 // ---------------------------------------------------------------------------
 // Event types and structs
@@ -61,12 +68,17 @@ volatile const __u8  sample_windows = 0;  // 1 = emit per-window byte sample for
 #define EVENT_ONSET 0
 #define EVENT_DRAIN 1
 
+#define REASON_THRESHOLD 0
+#define REASON_TIMEOUT   1
+
 struct burst_event {
 	__u32 type;          // EVENT_ONSET or EVENT_DRAIN
-	__u32 _pad;
+	__u32 reason;        // REASON_THRESHOLD or REASON_TIMEOUT (drain only)
 	__u64 cusum_value;   // upper_sum at onset, lower_sum at drain
 	__u64 window_bytes;  // delta bytes in the triggering window
 	__u64 change_point_ns; // estimated ktime of the traffic shift that produced this burst
+	__u64 mu;            // learned baseline the window was judged against
+	__u64 sigma;         // learned (floored) std-dev the window was judged against
 };
 
 struct window_sample {
@@ -86,6 +98,10 @@ struct cusum_state_t {
 	__u64 k_drain;      // drain slack; computed at onset = (mu_burst - mu_0) / 2 (design-decisions §4)
 	__u64 h_drain;      // per-burst effective drain threshold; computed at onset = h_drain (static) or h_slack_mult * k_drain (design-decisions §5-6)
 	__u64 accum_start_ns; // ktime of the start of the window in which the active arm (upper_sum pre-onset, lower_sum during a burst) last left zero
+	__u64 n;              // windows learned into the baseline (0 = setup restarts)
+	__u64 mu;             // learned baseline, bytes per window
+	__u64 var;            // learned variance, bytes^2
+	__u64 burst_start_ns; // ktime of the onset tick, for the t_max_ns timeout
 };
 
 struct timer_val {
@@ -161,28 +177,160 @@ static long sum_cb(__u32 cpu, struct sum_ctx *ctx)
 // Helper: emit an event to the ring buffer
 // ---------------------------------------------------------------------------
 
-static __always_inline void emit_event(__u32 type, __u64 cusum_value,
-                                       __u64 window_bytes, __u64 change_point_ns)
+static __always_inline void emit_event(__u32 type, __u32 reason, __u64 cusum_value,
+                                       __u64 window_bytes, __u64 change_point_ns,
+                                       __u64 mu, __u64 sigma)
 {
 	struct burst_event *ev = bpf_ringbuf_reserve(&burst_events, sizeof(*ev), 0);
 	if (!ev)
 		return;
 	ev->type            = type;
-	ev->_pad            = 0;
+	ev->reason          = reason;
 	ev->cusum_value     = cusum_value;
 	ev->window_bytes    = window_bytes;
 	ev->change_point_ns = change_point_ns;
+	ev->mu              = mu;
+	ev->sigma           = sigma;
 	bpf_ringbuf_submit(ev, 0);
 }
 
 // ---------------------------------------------------------------------------
-// Helper: mirror the FSM flag to burst_flag for downstream consumers
+// Online baseline helpers (integer only: no floats, no signed division)
 // ---------------------------------------------------------------------------
 
-static __always_inline void set_burst_flag(__u32 value)
+// Digit-by-digit integer square root, 32 rounds via bpf_loop. An inline
+// bounded for-loop branches on runtime values every round, so the verifier
+// walks 2^32 paths; a bpf_loop callback is verified once.
+struct isqrt_ctx {
+	__u64 v, r, bit;
+};
+
+static long isqrt_cb(__u32 i, struct isqrt_ctx *c)
 {
-	__u32 key = 0;
-	bpf_map_update_elem(&burst_flag, &key, &value, BPF_ANY);
+	if (c->v >= c->r + c->bit) {
+		c->v -= c->r + c->bit;
+		c->r = (c->r >> 1) + c->bit;
+	} else {
+		c->r >>= 1;
+	}
+	c->bit >>= 2;
+	return 0;
+}
+
+static __always_inline __u64 isqrt(__u64 v)
+{
+	struct isqrt_ctx c = { .v = v, .r = 0, .bit = 1ULL << 62 };
+	bpf_loop(32, isqrt_cb, &c, 0);
+	return c.r;
+}
+
+// Finch (2009) incremental mean/variance with alpha = 1/D:
+//   mu += d/D;  var = (1 - 1/D) * (var + d^2/D)
+// D = n (exact population Welford) while n <= n_welford, ewma_div after.
+static __always_inline void learn(struct cusum_state_t *st, __u64 x)
+{
+	st->n++;
+	__u64 D = st->n <= n_welford ? st->n : ewma_div;
+	if (D == 0)
+		D = 1;
+	__u64 d;
+	if (x >= st->mu) {
+		d = x - st->mu;
+		st->mu += d / D;
+	} else {
+		d = st->mu - x;
+		st->mu -= d / D;
+	}
+	if (d > (1ULL << 31))
+		d = 1ULL << 31; // d^2 < 2^62
+	__u64 t = st->var + d * d / D;
+	st->var = t - t / D;
+}
+
+static __always_inline void reset_sums(struct cusum_state_t *st)
+{
+	st->upper_sum = 0;
+	st->lower_sum = 0;
+	st->mu_burst  = 0;
+	st->k_drain   = 0;
+	st->h_drain   = 0;
+}
+
+// ---------------------------------------------------------------------------
+// FSM step — shared by the timer callback and the cusum_test_step entry
+// ---------------------------------------------------------------------------
+
+static __always_inline void cusum_step(struct cusum_state_t *st, __u32 *flag,
+                                       __u64 delta, __u64 now)
+{
+	// Pre-update baseline: detection and the learning gate both judge this
+	// window against what was learned before it.
+	__u64 mu    = st->mu;
+	__u64 sigma = isqrt(st->var);
+	if (sigma < sigma_floor)
+		sigma = sigma_floor;
+	int was_quiet = *flag == 0;
+
+	if (was_quiet) {
+		if (st->n >= n_setup) {
+			// The tick at T covers [T - window_ns, T]. If upper_sum was zero
+			// entering this tick and positive leaving it, the shift began
+			// inside that window, so T - window_ns is the earliest defensible
+			// estimate. Re-arms on every zero window and freezes on first
+			// accumulation.
+			if (st->upper_sum == 0)
+				st->accum_start_ns = now - window_ns;
+
+			// CUSUM+: upper_sum = max(0, upper_sum + (delta - mu - k)), k = sigma
+			st->upper_sum += (__s64)delta - (__s64)mu - (__s64)(k_sigma_mult * sigma);
+			if (st->upper_sum < 0)
+				st->upper_sum = 0;
+			if (st->upper_sum >= (__s64)(h_sigma_mult * sigma)) {
+				emit_event(EVENT_ONSET, REASON_THRESHOLD, st->upper_sum, delta,
+				           st->accum_start_ns, mu, sigma);
+				*flag = 1;
+				st->upper_sum      = 0;
+				st->lower_sum      = 0;
+				st->mu_burst       = delta;
+				st->k_drain        = (delta > mu) ? (delta - mu) / 2 : 0;
+				st->h_drain        = h_slack_mult * st->k_drain;
+				st->burst_start_ns = now;
+			}
+		}
+		// One-sided gate: windows below mu are always learned (a downward
+		// step must be tracked, the flag never rises to time it out). The
+		// onset window itself is not learned (flag already 1).
+		if (st->n < n_setup ||
+		    (*flag == 0 && (delta <= mu || delta - mu <= gate_sigma_mult * sigma)))
+			learn(st, delta);
+		return;
+	}
+
+	// Burst state: nothing is learned. A burst outliving the baseline's own
+	// memory (tau) is, by the EWMA's definition, the new level: force-drain
+	// and re-run setup from scratch.
+	if (now - st->burst_start_ns > t_max_ns) {
+		emit_event(EVENT_DRAIN, REASON_TIMEOUT, st->lower_sum, delta, now, mu, sigma);
+		*flag = 0;
+		reset_sums(st);
+		st->n = 0;
+		return;
+	}
+
+	// Same backdating trick as the onset arm, mirrored onto lower_sum.
+	if (st->lower_sum == 0)
+		st->accum_start_ns = now - window_ns;
+
+	// CUSUM-: lower_sum = max(0, lower_sum + (mu_burst - k_drain - delta))
+	st->lower_sum += (__s64)st->mu_burst - (__s64)st->k_drain - (__s64)delta;
+	if (st->lower_sum < 0)
+		st->lower_sum = 0;
+	if (st->lower_sum >= (__s64)st->h_drain) {
+		emit_event(EVENT_DRAIN, REASON_THRESHOLD, st->lower_sum, delta,
+		           st->accum_start_ns, mu, sigma);
+		*flag = 0;
+		reset_sums(st);
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -191,32 +339,24 @@ static __always_inline void set_burst_flag(__u32 value)
 
 static int cusum_tick(void *map, int *key, struct timer_val *val)
 {
-	// Re-arm immediately so the window is as regular as possible even if
-	// the FSM body is expensive.
+	// Re-arm immediately so the window is as regular as possible.
 	bpf_timer_start(&val->timer, window_ns, 0);
 
 	__u64 now = bpf_ktime_get_ns();
 
-	// Sum every CPU's slot of node_ingr_bytes.
 	struct sum_ctx sctx = {};
 	bpf_loop(MAX_CPUS, sum_cb, &sctx, 0);
 	__u64 total = sctx.total;
 
-	// Look up the FSM state. cusum_state is an ARRAY map with one entry, so
-	// this lookup always succeeds in practice; the verifier still requires
-	// the NULL check.
 	__u32 zero = 0;
 	struct cusum_state_t *st = bpf_map_lookup_elem(&cusum_state, &zero);
 	if (!st)
 		return 0;
 
-	// Per-window byte delta. Guard against the (extremely unlikely) wrap
-	// where total < prev_total — could only happen if the counter map was
-	// reset between ticks. Treat that case as a zero-delta window.
+	// Guard the (unlikely) wrap where the counter map was reset between ticks.
 	__u64 delta = (total >= st->prev_total) ? (total - st->prev_total) : 0;
 	st->prev_total = total;
 
-	// Emit a per-window sample to allow CUSUM tuning if requested (parameter specified at program load).
 	if (sample_windows) {
 		struct window_sample *s = bpf_ringbuf_reserve(&window_samples, sizeof(*s), 0);
 		if (s) {
@@ -227,62 +367,33 @@ static int cusum_tick(void *map, int *key, struct timer_val *val)
 		}
 	}
 
-	// Read the FSM's current state from burst_flag — the single source of
-	// truth. burst_flag is also Layer 1's architectural output, so reading
-	// it here avoids any duplicated-state-consistency concerns.
+	// burst_flag is the FSM state's single source of truth and Layer 1's
+	// architectural output; cusum_step writes it in place.
 	__u32 *flag = bpf_map_lookup_elem(&burst_flag, &zero);
 	if (!flag)
 		return 0;
 
-	if (*flag == 0) {
-		// The tick at T covers [T - window_ns, T]. If upper_sum was zero entering
-		// this tick and positive leaving it, the shift began inside that window,
-		// so T - window_ns is the earliest defensible estimate. Re-arms on every
-		// zero window and freezes on first accumulation — no comparison needed.
-		if (st->upper_sum == 0)
-			st->accum_start_ns = now - window_ns;
+	cusum_step(st, flag, delta, now);
+	return 0;
+}
 
-		// Upper CUSUM, detecting burst onset.
-		// CUSUM+ Formula: upper_sum = max(0, upper_sum + (delta - mu_0 - k))
-		st->upper_sum += (__s64)delta - (__s64)mu_0 - (__s64)k;
-		if (st->upper_sum < 0)
-			st->upper_sum = 0;
-		if (st->upper_sum >= h_onset) {
-			emit_event(EVENT_ONSET, st->upper_sum, delta, st->accum_start_ns);
-			set_burst_flag(1);
-			st->upper_sum = 0;
-			st->lower_sum = 0;
-			st->mu_burst =  delta;
-			st->k_drain  = (delta > mu_0) ? (delta - mu_0) / 2 : 0;
-			// h_drain (the static override) wins if set; otherwise derive the
-			// drain threshold in the same slack-unit currency as h_onset.
-			st->h_drain  = h_drain ? h_drain : h_slack_mult * st->k_drain;
-		}
-	} else {
-		// Same backdating trick as the onset arm above, mirrored onto
-		// lower_sum: re-arms on every window lower_sum sits at zero (right
-		// after the onset transition zeroes it) and freezes the instant it
-		// starts accumulating drain evidence, so change_point_ns reflects
-		// when the return to baseline actually began rather than the later
-		// tick where h_drain was finally crossed.
-		if (st->lower_sum == 0)
-			st->accum_start_ns = now - window_ns;
+// Test-only entry: drives cusum_step with a scripted (delta, now) via
+// BPF_PROG_TEST_RUN, since the timer callback cannot be. Never run in
+// production.
+struct step_ctx {
+	__u64 delta;
+	__u64 now;
+};
 
-		// Lower CUSUM, detecting burst drain.
-		// CUSUM- Formula: lower_sum = max(0, lower_sum + (mu_burst - k_drain - delta))
-		st->lower_sum += (__s64)st->mu_burst - (__s64)st->k_drain - (__s64)delta;
-		if (st->lower_sum < 0)
-			st->lower_sum = 0;
-		if (st->lower_sum >= (__s64)st->h_drain) {
-			emit_event(EVENT_DRAIN, st->lower_sum, delta, st->accum_start_ns);
-			set_burst_flag(0);
-			st->upper_sum = 0;
-			st->lower_sum = 0;
-			st->mu_burst  = 0;
-			st->k_drain   = 0;
-			st->h_drain   = 0;
-		}
-	}
+SEC("syscall")
+int cusum_test_step(struct step_ctx *ctx)
+{
+	__u32 zero = 0;
+	struct cusum_state_t *st = bpf_map_lookup_elem(&cusum_state, &zero);
+	__u32 *flag = bpf_map_lookup_elem(&burst_flag, &zero);
+	if (!st || !flag)
+		return 1;
+	cusum_step(st, flag, ctx->delta, ctx->now);
 	return 0;
 }
 

@@ -47,12 +47,8 @@ func main() {
 func run(logger *slog.Logger) error {
 	namespacesFlag := flag.String("namespaces", "default", "comma-separated allow-list of Kubernetes namespaces to attach to")
 	ciliumSocket := flag.String("cilium-socket", "/var/run/cilium/cilium.sock", "Cilium agent API socket, used to resolve pod namespaces and to label attribution flows with service names")
-	mu0 := flag.Uint64("mu0", 0, "baseline bytes per CUSUM window (default: C constant)")
-	k := flag.Uint64("k", 0, "CUSUM slack factor in bytes (default: C constant)")
-	hOnset := flag.Uint64("h-onset", 0, "onset threshold (upper_sum value) in bytes (default: C constant)")
-	hDrain := flag.Uint64("h-drain", 0, "static drain threshold in bytes (default: derived as h-slack-mult × k_drain; set explicitly only to reproduce pre-derivation runs)")
-	hSlackMult := flag.Uint64("h-slack-mult", 0, "drain threshold in slack units, h_drain = h-slack-mult × k_drain (default: derived from h_onset/k, i.e. the onset arm's own operating point)")
-	window := flag.Duration("window", 0, "CUSUM window duration (e.g. 10ms, 5ms) (default: C constant)")
+	hSlackMult := flag.Uint64("h-slack-mult", 0, "drain threshold in slack units, h_drain = h-slack-mult × k_drain (default: C constant 6, the onset arm's h_onset/k)")
+	window := flag.Duration("window", 0, "CUSUM window duration (e.g. 10ms, 5ms) (default: C constant 100ms); the baseline mu/sigma is learned online")
 	sampleWindows := flag.Bool("sample-windows", false, "emit per-window byte samples to CSV for CUSUM parameter tuning")
 	sampleCSV := flag.String("sample-csv", "", "path to write window sample CSV (default: stderr)")
 	eventCSV := flag.String("event-csv", "", "path to write onset/drain events as CSV for offline latency analysis (default: slog to stderr)")
@@ -74,14 +70,6 @@ func run(logger *slog.Logger) error {
 	var params cusumParams
 	flag.Visit(func(f *flag.Flag) {
 		switch f.Name {
-		case "mu0":
-			params.Mu0 = mu0
-		case "k":
-			params.K = k
-		case "h-onset":
-			params.HOnset = hOnset
-		case "h-drain":
-			params.HDrain = hDrain
 		case "h-slack-mult":
 			params.HSlackMult = hSlackMult
 		case "window":
@@ -158,15 +146,36 @@ func run(logger *slog.Logger) error {
 	// The attach path runs alongside the detector. If it dies on its own, the
 	// detector would keep running on stale maps, so it cancels the daemon.
 	attachErr := make(chan error, 1)
+	attachReady := make(chan struct{})
+	attachStart := time.Now()
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		err := runAttachLoop(ctx, logger, att, newNamespaceResolver(*ciliumSocket), allowedNS)
+		err := runAttachLoop(ctx, logger, att, newNamespaceResolver(*ciliumSocket), allowedNS, attachReady)
 		if err != nil {
 			attachErr <- err
 			cancel()
 		}
 	}()
+
+	// Arm only once every pre-existing pod is attached: the 30-window setup
+	// must learn fully counted traffic, or late attaches look like an upward
+	// step (a false onset stuck until the tau timeout). Normally milliseconds;
+	// the cap only matters if the Cilium agent is hung.
+	// ponytail: fixed 1 s cap; tighten once real startup times are logged.
+	select {
+	case <-attachReady:
+		logger.Info("startup attach complete", "elapsed", time.Since(attachStart).String())
+	case <-time.After(time.Second):
+		logger.Warn("startup attach not complete after 1s; arming anyway, baseline may undercount until re-learned")
+	case <-ctx.Done():
+		select {
+		case err := <-attachErr:
+			return fmt.Errorf("attach loop: %w", err)
+		default:
+			return nil
+		}
+	}
 
 	if err := det.seedPrevTotal(); err != nil {
 		return fmt.Errorf("seeding prev_total: %w", err)
@@ -175,19 +184,14 @@ func run(logger *slog.Logger) error {
 		return fmt.Errorf("arming timer: %w", err)
 	}
 
-	hDrainMode := "derived"
-	if params.HDrain != nil {
-		hDrainMode = "static"
-	}
 	logger.Info("burst detector armed",
 		"namespaces", *namespacesFlag,
-		"mu0", uint64OrDefault(params.Mu0),
-		"k", uint64OrDefault(params.K),
-		"h_onset", uint64OrDefault(params.HOnset),
-		"h_drain", uint64OrDefault(params.HDrain),
-		"h_slack_mult", det.hSlackMult,
-		"h_drain_mode", hDrainMode,
-		"window", windowOrDefault(params.WindowNs),
+		"window", time.Duration(det.windowNs).String(),
+		"tau", time.Duration(det.tauNs).String(),
+		"ewma_div", det.ewmaDiv,
+		"n_setup", 30,
+		"t_max", time.Duration(det.tauNs).String(),
+		"h_slack_mult", uint64OrDefault(params.HSlackMult),
 		"pin_dir", bpfPinDir,
 	)
 
@@ -356,15 +360,6 @@ func uint64OrDefault(p *uint64) any {
 	return *p
 }
 
-// windowOrDefault formats a nanosecond window duration as a human-readable
-// string, or "kernel-default" when p is nil.
-func windowOrDefault(p *uint64) any {
-	if p == nil {
-		return "kernel-default"
-	}
-	return time.Duration(*p).String()
-}
-
 func eventLoop(logger *slog.Logger, rd *ringbuf.Reader, onEvent func(BurstEvent)) error {
 	anchor, anchorErr := newWallAnchor()
 	if anchorErr != nil {
@@ -390,12 +385,18 @@ func eventLoop(logger *slog.Logger, rd *ringbuf.Reader, onEvent func(BurstEvent)
 
 		logger.Info("burst_event",
 			"type", eventTypeString(ev.Type),
+			"reason", eventReasonString(ev.Reason),
+			"mu", ev.Mu,
+			"sigma", ev.Sigma,
 			"change_point_ns", ev.ChangePointNs,
 			"change_point_utc", changeStr,
 			"cusum_value", ev.CusumValue,
 			"window_bytes", ev.WindowBytes,
 		)
 
+		if ev.Type == EventDrain && ev.Reason == ReasonTimeout {
+			logger.Warn("burst held longer than tau: forced drain, baseline re-learning (setup re-runs)")
+		}
 		if onEvent != nil {
 			onEvent(ev)
 		}

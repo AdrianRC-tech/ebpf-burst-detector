@@ -9,12 +9,14 @@ import (
 // ebpf/cusum_detector.bpf.c:
 //
 //   type             __u32  offset  0
-//   _pad             __u32  offset  4
+//   reason           __u32  offset  4
 //   cusum_value      __u64  offset  8
 //   window_bytes     __u64  offset 16
 //   change_point_ns  __u64  offset 24
+//   mu               __u64  offset 32
+//   sigma            __u64  offset 40
 //                                 ----
-//                                 32 bytes
+//                                 48 bytes
 
 func TestDecodeEvent_Onset(t *testing.T) {
 	raw := make([]byte, burstEventSize)
@@ -44,7 +46,10 @@ func TestDecodeEvent_Onset(t *testing.T) {
 func TestDecodeEvent_Drain(t *testing.T) {
 	raw := make([]byte, burstEventSize)
 	binary.LittleEndian.PutUint32(raw[0:], EventDrain)
+	binary.LittleEndian.PutUint32(raw[4:], ReasonTimeout)
 	binary.LittleEndian.PutUint64(raw[8:], 6_000_000)
+	binary.LittleEndian.PutUint64(raw[32:], 360_000)
+	binary.LittleEndian.PutUint64(raw[40:], 12_000)
 	binary.LittleEndian.PutUint64(raw[16:], 500_000)
 	binary.LittleEndian.PutUint64(raw[24:], 1_900_000_000)
 
@@ -57,5 +62,8 @@ func TestDecodeEvent_Drain(t *testing.T) {
 	}
 	if ev.ChangePointNs != 1_900_000_000 {
 		t.Errorf("ChangePointNs = %d, want 1_900_000_000", ev.ChangePointNs)
+	}
+	if ev.Reason != ReasonTimeout || ev.Mu != 360_000 || ev.Sigma != 12_000 {
+		t.Errorf("Reason/Mu/Sigma = %d/%d/%d, want %d/360000/12000", ev.Reason, ev.Mu, ev.Sigma, ReasonTimeout)
 	}
 }

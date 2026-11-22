@@ -23,6 +23,8 @@ statistics process ~10 numbers/second, not the ≥1 Mpps packet rate.
 
 ### 1. Decision — CUSUM parameters are calibrated **offline**, not computed online
 
+> **SUPERSEDED by §7 (2026-11-19).** μ/σ are now learned online in kernel; `calibrate.sh` is removed.
+
 **Decision.** `mu_0`, `k`, and `h_onset`/`h_drain` are derived offline by `cmd/baseline-stats`
 from a captured, known-quiescent baseline (`mu_0 = median`, `k = k_mult · σ̂`,
 `h = h_mult · σ̂`, with `σ̂ = 1.4826 · MAD`). They are baked into the BPF object at load time as
@@ -64,6 +66,8 @@ and reproducible for experiments, adaptive for long production runs. Out of scop
 ---
 
 ### 2. Decision — Online EWMA baseline adaptation is **deferred**; it is not a detection-speed mechanism
+
+> **SUPERSEDED by §7 (2026-11-19).** The latency argument below still holds: adaptivity is a drift-robustness feature, not a speed one. What changed is that a stale offline baseline (continuous false onsets above it, lost sensitivity below it) outweighed the reproducibility cost.
 
 **Decision.** No online EWMA (or any adaptive) baseline is used in Layer 1. If adaptivity is
 added later it is a robustness feature for baseline drift, explicitly **not** a latency feature.
@@ -337,7 +341,7 @@ increment `delta − mu_0 − k` was strictly positive and therefore `delta > mu
 `(delta > mu_0)` ternary at the onset transition in `cusum_detector.bpf.c` is dead code for any
 valid configuration. The only ways in are misconfiguration — `h_onset == 0`, or `k == 0` with
 `delta == mu_0 + 1` where integer division floors to `0`. Both are rejected at load time in the Go
-loader (`deriveHSlackMult` in `cmd/burst-detector/detector.go`) rather than defended against on the
+loader (formerly `deriveHSlackMult`; now the constant `h_slack_mult = 6` in `cusum_detector.bpf.c`) rather than defended against on the
 timer path.
 
 ---
@@ -346,8 +350,8 @@ timer path.
 
 | Parameter / mechanism | Decision | Why |
 |---|---|---|
-| `mu_0`, `k`, `h` calibration | **Offline** (`baseline-stats`), baked as `volatile const` | Bootstrap + reproducibility + inspectability; online is a production end-state, not a measurement one. |
-| Online EWMA baseline | **Deferred** | Cannot improve detection speed (structural); confounds controlled experiments. |
+| `mu_0`, `k`, `h` calibration | ~~Offline~~ → **online Welford→EWMA** (§7) | Bootstrap + reproducibility + inspectability; online is a production end-state, not a measurement one. |
+| Online EWMA baseline | ~~Deferred~~ → **implemented** (§7) | Cannot improve detection speed (structural); confounds controlled experiments. |
 | Drain reference | **`mu_burst`**, not `mu_0` | `mu_0` lower sum detects drop-*below*-baseline, not return-*to*-baseline. |
 | `mu_burst` estimation | ~~Snapshot at onset~~ → **bounded EWMA over first `n` burst windows** | Snapshot measured unstable (§3 note); single sample carries ~±100% error at CV = 1.00. |
 | `k_drain` | **Recompute at onset** `= (mu_burst − mu_0)/2` | `k = shift/2`; drain shift is runtime-only. Reusing `k_onset` → drain fires just below the peak → oscillation. **Correctness fix.** |
@@ -361,3 +365,59 @@ scales with `(mu_burst − mu_0)` via `k_drain`, computed in-kernel at onset and
 `--h-slack-mult` load-time knob (default `m = 6`, derived from `h_onset/k` when not passed
 explicitly). Burst-σ normalization remains rejected — it is not needed to fix this, and the
 fragility objection in §5 still stands against it.
+
+---
+
+### 7. Decision — Online baseline: Welford → EWMA μ/σ in kernel (IMPLEMENTED 2026-11-19)
+
+**Decision.** `mu_0`, `k`, `h_onset` are no longer load-time constants. Per tick, with `x` the
+window delta and `n` the number of windows *learned* so far:
+
+1. **Detection** (only once `n ≥ 30`): `σ = max(isqrt(var), 1500 B)`, `k = σ`, `h_onset = 6σ`.
+   The drain arm is unchanged (§3–§5; `k_drain = (mu_burst − μ)/2` uses the learned μ).
+2. **Learning gate** (pre-update μ/σ): learn `x` iff `n < 30`, or the window started and ended
+   quiescent and `x − μ ≤ 3σ`. **One-sided**: windows below μ are always learned, otherwise a
+   downward step (e.g. nightly load drop) would be rejected forever with no timeout to rescue it.
+   Cost: deep dips inflate σ slightly and pull μ down until the EWMA recovers. Neither the onset
+   window nor any burst window (drain window included) is learned.
+3. **Update** (Finch 2009), `α = 1/D`: `D = n` for `n ≤ 300` (exact population Welford), then
+   `D = ewma_div = round(τ/W)`. `μ += d/D; t = var + d²/D; var = t − t/D`.
+   Integer-only (no floats, no signed division): μ in bytes, var in bytes², `|d|` clamped to 2³¹.
+4. **Timeout**: a burst held longer than `t_max = τ` drains with `reason = timeout`
+   (`change_point = now`), zeroes the sums and sets `n = 0`, re-running setup. A "burst" longer
+   than the baseline's own memory is, by the EWMA's definition, the new level; τ is still ≫ every
+   tested burst (≤ 400 ms).
+
+**τ = max(10 s, 300·W).** τ ≥ 300·W keeps `W/τ ≤ 1/300`, so the weight never increases at the
+n = 300 switch.
+
+| W | τ | `ewma_div` |
+|---|---|---|
+| 5 ms | 10 s | 2000 |
+| 10 ms | 10 s | 1000 |
+| 25 ms | 10 s | 400 |
+| 50 ms | 15 s | 300 |
+| 100 ms | 30 s | 300 |
+
+**Evidence** (offline replay, `experiments/analysis/compare_cusum_ewma.py`, `gate = 3`):
+detection 100 %, IoU @50 ms 0.67 with continuous α vs 0.61 with an early α switch. The replay
+used `α = max(1/n, W/τ)` and a 1.5 s setup; the fixed n = 300 switch and 30-window setup shipped
+here differ at W < 33 ms, so the first end-to-end w10 run is the first measurement of this exact
+variant.
+
+**Trade-offs accepted.**
+- Ramps slower than τ are absorbed into the baseline and never fire.
+- A burst during setup (detection off) inflates μ/σ until τ corrects it. In particular, starting
+  the daemon on idle traffic and then ramping load is an onset that holds until the τ timeout.
+- Detection is not trustworthy for ~15 windows after setup. With only 30 samples σ is still noisy
+  (~±13 %), so `upper_sum` drifts positive more easily and a burst arriving within a few windows
+  inherits a change point backdated to the drift start. Measured at w100 (2026-11-19,
+  `tmp/runs/initial-tryout-adaptative`): burst 000 arriving 4 windows after setup had its change
+  point 418–448 ms early in 5/5 reps (scored as missed + FP); at 15 windows (`SETTLE_S=5`) it scored
+  normally. Experiments keep `SETTLE_S=4` for every window on purpose: burst 000 then arrives
+  ≈ 3.5 s after arming (5 windows after setup at w100, ≥ 40 at w ≤ 50 ms), so the w100 burst 000
+  measures this warm-up limitation and should be reported separately from steady-state bursts.
+- Each event carries the `mu`/`sigma` it was judged against (the information that used to live in
+  the conf), and the NDJSON attribution record carries `baseline_mu`/`baseline_sigma`. A timeout drain is logged as a re-learning warning, not attributed (see below).
+- With the default `-ring-retention 3s`, attribution emits an unpaired record at 3 s, so a timeout
+  drain (≥ 10 s) is always "late" and ignored by attribution.

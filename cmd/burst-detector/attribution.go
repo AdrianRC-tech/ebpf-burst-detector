@@ -34,9 +34,13 @@ type attributionRecord struct {
 	TotalBytes uint64 `json:"total_bytes"`
 	Flows      int    `json:"flows"`
 
-	Truncated    bool `json:"truncated"`
-	Unpaired     bool `json:"unpaired"`
-	EvictedFlows int  `json:"evicted_flows"`
+	Truncated bool `json:"truncated"`
+	Unpaired  bool `json:"unpaired"`
+
+	// BaselineMu/Sigma are the learned baseline the onset was judged against.
+	BaselineMu    uint64 `json:"baseline_mu"`
+	BaselineSigma uint64 `json:"baseline_sigma"`
+	EvictedFlows  int    `json:"evicted_flows"`
 
 	// SnapshotsUsed are the stamps of the snapshots that bounded the window
 	// (s0 and s1), same format as the change points. Omitted without a
@@ -191,7 +195,7 @@ const minDefaultSnapshotInterval = 50 * time.Millisecond
 // deriveSnapshotInterval resolves the flow-ring poll interval: an explicit
 // --snapshot-interval always wins; otherwise it falls back to the CUSUM
 // detector's effective window (read back from the BPF object's .rodata, the
-// same pattern as deriveHSlackMult in loader.go), floored at
+// see loadCusumSpec in detector.go), floored at
 // minDefaultSnapshotInterval. An error means neither is available.
 func deriveSnapshotInterval(flagVal time.Duration, effectiveWindowNs uint64) (time.Duration, error) {
 	if flagVal > 0 {
@@ -401,6 +405,8 @@ func (s *attributionState) emit(pending *pendingOnset, drain BurstEvent, s1Stamp
 	}
 	rec.Truncated = truncated
 	rec.Unpaired = unpaired
+	rec.BaselineMu = pending.ev.Mu
+	rec.BaselineSigma = pending.ev.Sigma
 
 	s.writeMu.Lock()
 	err := s.writer.write(rec)
