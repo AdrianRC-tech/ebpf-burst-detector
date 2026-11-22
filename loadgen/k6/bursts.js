@@ -34,25 +34,41 @@ const RAMP_MS = envNum('RAMP_MS', 0);
 // Optional request mix for the burst's added traffic, "search,recommend,user,reserve" fractions
 // summing to 1 (e.g. "0.1,0.1,0.4,0.4"). Unset = burst traffic uses the default mix.
 const BURST_MIX = __ENV.BURST_MIX ? parseMix(__ENV.BURST_MIX) : null;
+// >1 splits the bursty window into N equal abrupt steps up to the peak (base+R/N, base+2R/N, ...,
+// base+R), then drops abruptly to baseline. 1 = flat burst, identical to the original script.
+const N_STEPS = envNum('N_STEPS', 1);
+if (N_STEPS < 1 || (N_STEPS > 1 && RAMP_MS > 0)) {
+  throw new Error(`N_STEPS=${N_STEPS} RAMP_MS=${RAMP_MS}: need N_STEPS>=1, and steps cannot be combined with a ramp`);
+}
 
 // Rates are additive so they read like the two-wrk2-process setup, but a k6 stage target is a
 // total offered rate. Convert here, once.
 const PEAK_RATE = BASELINE_RATE + BURSTY_WINDOW_RPS;
+const STEP_RATES = Array.from({ length: N_STEPS },
+  (_, j) => BASELINE_RATE + Math.round((BURSTY_WINDOW_RPS * (j + 1)) / N_STEPS));
+// Integer-ms step ends that sum exactly to the bursty window (e.g. 100 ms / 3 -> 33, 67, 100).
+const STEP_ENDS_MS = Array.from({ length: N_STEPS },
+  (_, j) => Math.round((BURSTY_WINDOW_SIZE_MS * (j + 1)) / N_STEPS));
+const STEP_MS = STEP_ENDS_MS.map((e, j) => e - (j ? STEP_ENDS_MS[j - 1] : 0));
 
 const SETTLE_MS = SETTLE_S * 1000;
 const GAP_MS = GAP_S * 1000;
 // Each cycle is: ramp up, hold at peak, ramp down, hold at baseline. RAMP_MS=0 collapses the
 // ramp segments to zero width, reproducing the original abrupt-edge cycle exactly.
 const CYCLE_MS = 2 * RAMP_MS + BURSTY_WINDOW_SIZE_MS + GAP_MS;
-const EXPECTED_PER_BURST = (PEAK_RATE * BURSTY_WINDOW_SIZE_MS) / 1000;
+const EXPECTED_PER_BURST = STEP_RATES.reduce((a, r, j) => a + (r * STEP_MS[j]) / 1000, 0);
 
 // ── schedule ─────────────────────────────────────────────────────────────────
 
 function buildStages() {
   const stages = [{ target: BASELINE_RATE, duration: `${SETTLE_MS}ms` }];
   for (let i = 0; i < N_BURSTS; i++) {
-    stages.push({ target: PEAK_RATE, duration: `${RAMP_MS}ms` });
-    stages.push({ target: PEAK_RATE, duration: `${BURSTY_WINDOW_SIZE_MS}ms` });
+    // With N_STEPS=1 this is the original ramp-to-peak + hold-at-peak pair.
+    stages.push({ target: STEP_RATES[0], duration: `${RAMP_MS}ms` });
+    for (let j = 0; j < N_STEPS; j++) {
+      if (j > 0) stages.push({ target: STEP_RATES[j], duration: '0ms' });
+      stages.push({ target: STEP_RATES[j], duration: `${STEP_MS[j]}ms` });
+    }
     stages.push({ target: BASELINE_RATE, duration: `${RAMP_MS}ms` });
     stages.push({ target: BASELINE_RATE, duration: `${GAP_MS}ms` });
   }
@@ -72,6 +88,13 @@ function phaseAt(elapsedMs) {
   if (tc < RAMP_MS + BURSTY_WINDOW_SIZE_MS) return `burst_${pad3(i)}`;
   if (tc < RAMP_MS + BURSTY_WINDOW_SIZE_MS + RAMP_MS) return `ramp_down_${pad3(i)}`;
   return 'base';
+}
+
+// Offered rate at elapsedMs inside a burst_NNN phase (only BURST_MIX needs it).
+function burstRateAt(elapsedMs) {
+  const tc = (elapsedMs - SETTLE_MS) % CYCLE_MS - RAMP_MS;
+  const j = STEP_ENDS_MS.findIndex((e) => tc < e);
+  return STEP_RATES[j < 0 ? N_STEPS - 1 : j];
 }
 
 // A tag-filtered sub-metric only exists if a threshold declares it, so these thresholds are
@@ -115,7 +138,8 @@ let rng = null;
 export function setup() {
   const t0 = Date.now();
   console.log(`plan: baseline=${BASELINE_RATE}rps peak=${PEAK_RATE}rps ` +
-    `window=${BURSTY_WINDOW_SIZE_MS}ms ramp=${RAMP_MS}ms n=${N_BURSTS} gap=${GAP_S}s target=${TARGET}`);
+    `window=${BURSTY_WINDOW_SIZE_MS}ms ramp=${RAMP_MS}ms n=${N_BURSTS} gap=${GAP_S}s target=${TARGET}` +
+    (N_STEPS > 1 ? ` steps=${N_STEPS} step_rates=[${STEP_RATES.join(',')}]` : ''));
   console.log(`plan: expected ${EXPECTED_PER_BURST} requests per bursty window`);
   console.log('plan: burst_idx  start_ns  end_ns  start_utc  end_utc  (anchored at setup; ' +
     'hold-at-peak segment, excludes ramp)');
@@ -125,6 +149,14 @@ export function setup() {
     console.log(
       `plan: ${pad3(i)}  ${s * 1e6}  ${e * 1e6}  ${utcNanos(s)}  ${utcNanos(e)}`
     );
+    // Distinct prefix: score_run.py's PLAN_RE ("plan: NNN") must keep seeing one line per burst.
+    for (let j = 0; N_STEPS > 1 && j < N_STEPS; j++) {
+      const ss = s + (j ? STEP_ENDS_MS[j - 1] : 0);
+      const se = s + STEP_ENDS_MS[j];
+      console.log(
+        `plan_step: ${pad3(i)} ${j}  ${STEP_RATES[j]}rps  ${ss * 1e6}  ${se * 1e6}  ${utcNanos(ss)}  ${utcNanos(se)}`
+      );
+    }
   }
   return { t0 };
 }
@@ -145,9 +177,9 @@ export default function () {
   // BURSTY_WINDOW_RPS/PEAK_RATE share of the arrival stream) uses BURST_MIX. No extra rng()
   // draw when BURST_MIX is unset, so default runs stay identical for a given SEED.
   let mix;
-  if (BURST_MIX !== null && phase.startsWith('burst_') &&
-      rng() < BURSTY_WINDOW_RPS / PEAK_RATE) {
-    mix = BURST_MIX;
+  if (BURST_MIX !== null && phase.startsWith('burst_')) {
+    const rate = burstRateAt(elapsed);
+    if (rng() < (rate - BASELINE_RATE) / rate) mix = BURST_MIX;
   }
   const req = pickRequest(rng, mix);
   const res = http.request(req.method, TARGET + req.path, null, {
