@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """One-off: copy the scored results the paper figures use from tmp/runs into data/<campaign>/{results,runs}.csv.
 
-Only the b2500/p5000 burst shape is kept for burst campaigns; stable-baselines keeps every baseline rate.
+Only the b2500/p5000 burst shape is kept for burst campaigns; baseline-only campaigns are kept whole.
 Plot scripts never run this; they read data/ directly. Run from the repo root:
     python3 -m experiments.analysis.export_plot_data
 """
@@ -11,8 +11,8 @@ from pathlib import Path
 
 from .load import load, load_runs
 
-BURST = ["1s-gapped-bursts", "100ms-gapped-bursts", "250ms-gapped-bursts", "400ms-gapped-bursts"]
-BASELINE = ["stable-baselines"]
+BURST = ["1s-gapped-bursts", "50ms-gapped-bursts","100ms-gapped-bursts", "250ms-gapped-bursts", "400ms-gapped-bursts", "staircase_campaign"]
+BASELINE = ["flat-baseline", "drift-baseline"]
 OUT = Path("data")
 
 

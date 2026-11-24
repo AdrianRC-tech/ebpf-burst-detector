@@ -1,0 +1,6 @@
+campaign,config_id,cusum_window_size,baseline_rps,peak_rps,burst_window_size,rep,fp_events,n_onset_events,n_drain_events,n_unpaired,n_truncated,scenario_offset_ms,duration_s,n_split,n_early,n_outside
+flat-baseline,w100_bl2500_p2500_b0,100,2500,2500,0,1,0,0,0,0,0,,904,0,0,0
+flat-baseline,w10_bl2500_p2500_b0,10,2500,2500,0,1,4,2,2,0,0,,904,0,0,2
+flat-baseline,w25_bl2500_p2500_b0,25,2500,2500,0,1,0,0,0,0,0,,904,0,0,0
+flat-baseline,w50_bl2500_p2500_b0,50,2500,2500,0,1,0,0,0,0,0,,904,0,0,0
+flat-baseline,w5_bl2500_p2500_b0,5,2500,2500,0,1,18,9,9,0,0,,904,0,0,9
