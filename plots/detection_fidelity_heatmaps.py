@@ -31,18 +31,18 @@ def overlap_heatmap(df, label, col):
             v = grid.loc[w, b]
             if np.isnan(v):
                 continue
-            ax.text(j, i, f"{v:.0f}", ha="center", va="center", fontsize=7,
+            ax.text(j, i, f"{v:.0f}", ha="center", va="center", fontsize=8.5,
                     color="white" if v > 60 else "black")
     ax.set_xticks(range(len(bs)), [str(b) for b in bs])
     ax.set_yticks(range(len(ws)), [str(w) for w in ws])
-    ax.tick_params(labelsize=7.5)
+    ax.tick_params(labelsize=8)
     ax.set_xlabel("Burst length (ms)")
     ax.set_ylabel("CUSUM window (ms)")
     ax.set_title(f"{label} (%)", fontsize=9)
     ax.grid(False)
     cbar = fig.colorbar(im, ax=ax, ticks=[0, 50, 100], pad=0.03)  # colour scale: 0-100 %
-    cbar.ax.tick_params(labelsize=7)
-    cbar.set_label("Mean (%)", fontsize=7.5)
+    cbar.ax.tick_params(labelsize=8)
+    cbar.set_label("Mean (%)", fontsize=8)
     fig.tight_layout()
     return fig
 
