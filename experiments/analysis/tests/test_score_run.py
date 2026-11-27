@@ -115,6 +115,49 @@ class ScoreTests(unittest.TestCase):
         _, r, _ = run(clean_events(), settle_s=10)
         self.assertEqual(r["scenario_offset_ms"], "0")
 
+    def test_onset_cp_step(self):
+        self.assertNotIn("onset_cp_step", run(clean_events())[0][0])  # flat bursts: no column
+        # Burst 0 split into 3 steps ending at +167, +333, +500 ms.
+        s0 = 1792074073927000000
+        k6 = K6 + "".join(f"plan_step: 000 {j}  {r}rps  0  {s0 + e * 10**6}  x  y\n"
+                          for j, (r, e) in enumerate([(3333, 167), (4167, 333), (5000, 500)]))
+        for lat, want in ((-0.1, 0), (0.05, 1), (0.2, 2), (0.4, 3)):
+            rows, _, _ = run(events([rec(tod(13.927 + lat), tod(14.5))]), k6=k6)
+            self.assertEqual(rows[0]["onset_cp_step"], want, lat)
+
+    def test_split_burst_scores_union_of_pieces(self):
+        # Burst 0 (500 ms) detected as [0, 200] + [300, 500]: premature drain, re-onset 100 ms later.
+        s = BURST_S[0]
+        ev = events([rec(tod(s), tod(s + 0.2)), rec(tod(s + 0.3), tod(s + 0.5))])
+        rows, r, _ = run(ev)
+        self.assertEqual((rows[0]["n_pieces"], rows[0]["pieces"]), (2, "0:200;300:500"))
+        self.assertEqual((rows[0]["onset_latency_ms"], rows[0]["drain_latency_ms"]), ("0", "0"))
+        self.assertEqual(rows[0]["det_len_ms"], "400")  # the 100 ms gap is not detected time
+        self.assertEqual((rows[0]["coverage_pct"], rows[0]["iou_pct"]), ("80", "80"))
+        self.assertEqual((r["n_split"], r["n_early"], r["n_outside"]), (1, 0, 0))
+        self.assertEqual(r["fp_events"], 2)  # the inner drain and re-onset
+
+    def test_early_backdated_detection(self):
+        # Onset 400 ms before the start (past the 300 ms tol): missed, drain kept, counted as early.
+        rows, r, _ = run(events([rec(tod(BURST_S[0] - 0.4), tod(BURST_S[0] + 0.5))]))
+        self.assertEqual((rows[0]["detected"], rows[0]["drain_detected"], rows[0]["n_pieces"]), (0, 1, 0))
+        self.assertEqual((r["n_split"], r["n_early"], r["n_outside"]), (0, 1, 0))
+
+    def test_early_drain_serves_one_burst(self):
+        # One early detection spanning bursts 0 and 1: its drain may be claimed once, never negative fp.
+        rows, r, _ = run(events([rec(tod(BURST_S[0] - 0.4), tod(BURST_S[0] + 0.6))]),
+                         k6=K6, tol_drain_ms=10_000)
+        self.assertEqual([x["drain_detected"] for x in rows], [1, 0, 0, 0, 0])
+        self.assertEqual((r["fp_events"], r["n_early"]), (1, 1))
+
+    def test_outside_and_pre_burst_blip(self):
+        # A blip that drains before the burst starts is not a piece of it, even within tol.
+        s = BURST_S[0]
+        ev = clean_events() + events([rec(tod(s - 0.2), tod(s - 0.1)), rec("14:21:50.000000000", unpaired=True)])
+        rows, r, _ = run(ev)
+        self.assertEqual(rows[0]["n_pieces"], 1)
+        self.assertEqual((r["n_split"], r["n_early"], r["n_outside"]), (0, 0, 2))
+
     def test_empty_utc_skipped(self):
         ev = clean_events() + events([rec("", unpaired=True)])
         _, r, _ = run(ev)

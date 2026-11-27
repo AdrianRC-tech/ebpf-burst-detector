@@ -15,7 +15,7 @@ from detection_latency import latency_figure, latex_table, median_table
 from detection_fidelity_heatmaps import overlap_heatmap
 from detection_fidelity_per_burst import overlap_endpoints
 from TPR import tpr_cell_table, tpr_figure
-from FPR import fpr_figure, fpr_per_s
+from FPR import fp_per_min, fpr_figure
 from shortly_gapped_burst_resolution_heatmaps import gapped_heatmap, resolved_per_run
 from utils import with_precision
 
@@ -28,7 +28,10 @@ def frame(campaign="c", windows=(25, 50), bursts=(200, 500), reps=3, n=4, base=1
             for r in range(reps):
                 for i in range(n):
                     missed = miss and w == windows[0] and r == 0 and i == 0
+                    split = w == windows[0] and r == 0 and i == 1  # one burst split by a premature drain
+                    pieces = "" if missed else f"0:{b * 0.4:g};{b * 0.6:g}:{b:g}" if split else f"0:{b:g}"
                     rows.append({
+                        "n_pieces": pieces.count(":"), "pieces": pieces,
                         "campaign": campaign, "config_id": f"w{w}", "cusum_window_size": w,
                         "burst_window_size": b, "baseline_rps": base, "peak_rps": peak, "rep": r + 1,
                         "burst_idx": i, "detected": int(not missed), "drain_detected": int(not missed),
@@ -47,8 +50,9 @@ def nbars(fig):
 
 class TestStats(unittest.TestCase):
     def test_fpr(self):
-        self.assertAlmostEqual(fpr_per_s(3, 120), 0.025)
-        self.assertTrue(np.isnan(fpr_per_s(1, 0)))
+        runs = pd.DataFrame({"cusum_window_size": [25, 25, 50], "n_onset_events": [2, 1, 0],
+                             "duration_s": [900.0, 900.0, 900.0]})
+        self.assertEqual(fp_per_min(runs), {25: (3, 0.1), 50: (0, 0.0)})  # pooled over reps
 
     def test_tpr_counts_misses(self):
         t = tpr_cell_table(frame())
@@ -98,7 +102,7 @@ class TestFigures(unittest.TestCase):
         self.assertEqual(len(overlap_heatmap(df, "IoU", "iou_pct").axes), 2)  # heatmap + colour bar
         fig = overlap_endpoints(df, 25, 200)
         self.assertEqual(len(fig.axes), 1)
-        self.assertEqual(fig.axes[0].get_title("right"), "Missed 1/12")
+        self.assertEqual(fig.axes[0].get_title("right"), "Missed 1/12 · Split 1/12")
 
     def test_tpr_per_burst_length(self):
         fig = tpr_figure(self.f["a"], 25)
@@ -106,11 +110,8 @@ class TestFigures(unittest.TestCase):
         self.assertEqual(len(fig.axes[0].patches), 2)  # one bar per burst size of that window
 
     def test_fpr_figure(self):
-        runs = pd.DataFrame({"cusum_window_size": [25, 25, 50], "baseline_rps": [1000, 2000, 1000],
-                             "fp_events": [1, 0, 0], "duration_s": [300.0, 300.0, 300.0]})
-        fig = fpr_figure(runs, 25, 0.1)
-        self.assertEqual(len(fig.axes[0].patches), 2)  # one bar per baseline rate
-        self.assertEqual(len(fpr_figure(runs, 50, 0.1).axes[0].patches), 1)  # 2000 rps has no w=50 run
+        fig = fpr_figure({"flat-baseline": {25: (0, 0.0), 50: (1, 0.07)}, "drift-baseline": {25: (2, 0.13)}})
+        self.assertEqual(len(fig.axes[0].patches), 3)  # one bar per (scenario, window) present
 
     def test_with_precision(self):
         df = with_precision(frame())
