@@ -134,8 +134,9 @@ func printReport(w io.Writer, s Stats, params SuggestedParams, kMult, hMult floa
 	fmt.Fprintln(w, "  in-kernel from this operating point (h_drain = m × k_drain), not emitted")
 	fmt.Fprintln(w, "  as a flag here. See design-decisions-cusum-calibration.md §5-6.")
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "=== Suggested flags ===")
+	fmt.Fprintln(w, "=== Static-baseline equivalent (offline reference only) ===")
+	fmt.Fprintln(w, "  burst-detector learns mu/sigma online; these are for offline replays.")
 	fmt.Fprintln(w)
-	fmt.Fprintf(w, "  --mu0=%d --k=%d --h-onset=%d\n",
+	fmt.Fprintf(w, "  mu0=%d k=%d h_onset=%d\n",
 		params.Mu0, params.K, params.H)
 }

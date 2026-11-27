@@ -24,6 +24,9 @@ import (
 type linkEvent struct {
 	dev netkitDev
 	add bool // true = RTM_NEWLINK, false = RTM_DELLINK
+	// startupDone marks the end of the startup snapshot. The worker is FIFO, so
+	// on reaching it every pre-existing device has been attached or skipped.
+	startupDone bool
 }
 
 // runAttachLoop keeps the data-path programs attached to every allowed pod's
@@ -32,7 +35,9 @@ type linkEvent struct {
 // until ctx is cancelled. It blocks until both internal goroutines have
 // drained, so the caller may safely close att afterwards. A non-nil error means
 // the attach path died on its own (not via ctx) and the daemon should stop.
-func runAttachLoop(parent context.Context, logger *slog.Logger, att *attachment, resolver nsResolver, allowedNS map[string]struct{}) error {
+// ready is closed once the startup snapshot has been processed, so the caller
+// can arm the detector only when the counter sees all existing pods.
+func runAttachLoop(parent context.Context, logger *slog.Logger, att *attachment, resolver nsResolver, allowedNS map[string]struct{}, ready chan<- struct{}) error {
 	// Subscribe FIRST, before enumeration, to close the enumerate→subscribe
 	// window. attachOne's "already attached" guard absorbs any duplicate
 	// RTM_NEWLINK events that arrive between subscribe and snapshot delivery.
@@ -113,6 +118,10 @@ func runAttachLoop(parent context.Context, logger *slog.Logger, att *attachment,
 	go func() {
 		defer workWG.Done()
 		for ev := range events {
+			if ev.startupDone {
+				close(ready)
+				continue
+			}
 			if ev.add {
 				// If PeerIfindex is already set (startup snapshot via
 				// discoverNetkitDevices), skip enrichment to avoid a redundant
@@ -165,9 +174,9 @@ func runAttachLoop(parent context.Context, logger *slog.Logger, att *attachment,
 		stopAndWait()
 		return fmt.Errorf("discovering netkit devices: %w", err)
 	}
-	for _, dev := range peers {
+	for _, ev := range append(toAddEvents(peers), linkEvent{startupDone: true}) {
 		select {
-		case events <- linkEvent{dev: dev, add: true}:
+		case events <- ev:
 		case <-ctx.Done():
 			stopAndWait()
 			return recvErr // nil when the parent ctx was cancelled
@@ -179,4 +188,12 @@ func runAttachLoop(parent context.Context, logger *slog.Logger, att *attachment,
 	<-ctx.Done()
 	stopAndWait()
 	return recvErr
+}
+
+func toAddEvents(devs []netkitDev) []linkEvent {
+	evs := make([]linkEvent, len(devs))
+	for i, d := range devs {
+		evs[i] = linkEvent{dev: d, add: true}
+	}
+	return evs
 }

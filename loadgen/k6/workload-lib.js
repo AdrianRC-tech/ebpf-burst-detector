@@ -1,4 +1,4 @@
-// Shared code for the k6 scenario scripts (bursts.js, staircase.js): the HotelReservation
+// Shared code for the k6 scenario scripts (bursts.js, drift.js): the HotelReservation
 // request mix, its seeded RNG, and the summary-reporting helpers. Kept bursty scenario-agnostic
 
 // ── env helpers ──────────────────────────────────────────────────────────────

@@ -1,65 +1,51 @@
-"""Scenario C: False alarms per second from baseline-only runs, one figure per CUSUM window, one bar per baseline rate.
-The window is only in the file name; add it to the caption by hand. All figures share the y scale.
+"""False alarms per minute on burst-free load, per CUSUM window: flat 2500 rps vs drifting 2500 -> 3000 -> 2500 rps (+-8% wander).
+One 15 min rep per bar, annotated with its rate; a 0 means < ~0.2/min (95 %), not a proven zero.
 
-    python plots/FPR.py   ->  figures/FPR/FPR_cusum_window_<N>ms.{svg,pdf}
+    python plots/FPR.py   ->  figures/FPR/FPR.{svg,pdf}
 """
 import matplotlib.pyplot as plt
 import pandas as pd
 
 import utils
 
-INPUT = utils.DATA / "stable-baselines" / "runs.csv"
+SCENARIOS = (("flat-baseline", "Flat 2500 rps", utils.ONSET), ("drift-baseline", "Drift 2500-3000 rps", utils.DRAIN))
 
 
-def fpr_per_s(fp_events, duration_s):
-    return fp_events / duration_s if duration_s else float("nan")
-
-
-def fpr_table(runs):
-    """[(cusum_w, fp_events, duration_s, fp_per_s)] pooled over reps."""
-    out = []
-    if runs.empty or "duration_s" not in runs:
-        return out
+def fp_per_min(runs):
+    """{cusum_w: (onsets, per_min)} pooled over reps. One false alarm = one onset/drain pair = one onset."""
+    out = {}
     for w, sub in runs.groupby("cusum_window_size"):
-        fp, dur = int(sub.fp_events.sum()), float(sub.duration_s.sum())
-        out.append((int(w), fp, dur, fpr_per_s(fp, dur)))
+        n = int(sub.n_onset_events.sum())
+        out[int(w)] = (n, n / sub.duration_s.sum() * 60)
     return out
 
 
-def rate_of(runs, window, baseline_rps):
-    """Pooled false alarms per second for one (CUSUM window, baseline rate); None if there are no runs."""
-    t = fpr_table(runs[(runs.cusum_window_size == window) & (runs.baseline_rps == baseline_rps)])
-    return t[0][3] if t else None
-
-
-def fpr_figure(runs, window, ymax):
-    """False alarms per second for one CUSUM window: one bar per baseline rate. ymax is shared by all windows."""
+def fpr_figure(tables):
     utils.apply()
     fig, ax = plt.subplots(figsize=utils.PAPER_FIGSIZE)
-    rates = sorted(runs.baseline_rps.unique())
-    for i, r in enumerate(rates):
-        rate = rate_of(runs, window, r)
-        if rate is None:
-            continue
-        ax.bar(i, rate, 0.7, color=utils.ONSET, alpha=0.6, zorder=2)
-        ax.annotate(f"{rate:.2g}", (i, rate), xytext=(0, 3), textcoords="offset points",
-                    ha="center", va="bottom", rotation=90, fontsize=6.5)
-    ax.set_xticks(range(len(rates)), [str(r) for r in rates])
-    ax.set_xlabel("Baseline rate (rps)")
-    ax.set_ylabel("False alarms per second")
-    ax.set_ylim(0, ymax)
+    windows = sorted({w for t in tables.values() for w in t})
+    for k, (camp, label, color) in enumerate(SCENARIOS):
+        for i, w in enumerate(windows):
+            if w not in tables[camp]:
+                continue
+            n, rate = tables[camp][w]
+            x = i + (k - 0.5) * utils.BAR_W
+            ax.bar(x, rate, utils.BAR_W, color=color, alpha=0.7, zorder=2, label=label if i == 0 else None)
+            ax.annotate(f"{rate:.2g}", (x, rate), xytext=(0, 2), textcoords="offset points",
+                        ha="center", va="bottom", rotation=90, fontsize=6.5)
+    ax.set_xticks(range(len(windows)), [str(w) for w in windows])
+    ax.set_xlabel("CUSUM window (ms)")
+    ax.set_ylabel("False alarms per minute")
+    ax.set_ylim(0, max(r for t in tables.values() for _, r in t.values()) * 1.3)
     ax.grid(axis="x", visible=False)
+    ax.legend(fontsize=7, frameon=False)
     fig.tight_layout()
     return fig
 
 
 def main():
-    runs = pd.read_csv(INPUT)
-    runs = runs[runs.burst_window_size == 0].dropna(subset=["duration_s"])
-    windows = sorted(runs.cusum_window_size.unique())
-    top = max(v for w in windows for r in runs.baseline_rps.unique() if (v := rate_of(runs, w, r)) is not None)
-    for w in windows:  # same y scale in all four, so the figures stay comparable
-        utils.save(fpr_figure(runs, w, top * 1.3), f"FPR_cusum_window_{w}ms", utils.OUT / "FPR")
+    tables = {c: fp_per_min(pd.read_csv(utils.DATA / c / "runs.csv")) for c, _, _ in SCENARIOS}
+    utils.save(fpr_figure(tables), "FPR", utils.OUT / "FPR")
 
 
 if __name__ == "__main__":

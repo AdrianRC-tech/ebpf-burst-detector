@@ -8,6 +8,7 @@ NODE=${NODE:-burst-detection-lab-worker}
 GRACE_S=${GRACE_S:-3}      # after k6 ends: > window + drain horizon
 SETTLE_BETWEEN_S=${SETTLE_BETWEEN_S:-10}
 TAIL_S=${TAIL_S:-0}        # quiescent tail after the last burst; set e.g. 300 with N_BURSTS=0 for the FPR campaign
+K6_SCRIPT=${K6_SCRIPT:-loadgen/k6/bursts.js}   # drift.js = burst-free drifting baseline (same SETTLE_S + TAIL_S contract)
 BPF_DIR=/sys/fs/bpf/burst-detector
 
 CONF=${1:?usage: $0 <conf> --campaign NAME [--reps N] [--score]}; shift
@@ -24,16 +25,18 @@ done
 
 # Command-line env overrides win over the conf file.
 OVERRIDES=""
-for v in WINDOW MU0 K H_ONSET H_SLACK_MULT BASELINE_RATE BURSTY_WINDOW_RPS BURSTY_WINDOW_SIZE_MS N_BURSTS GAP_S SETTLE_S TARGET; do
+for v in WINDOW BASELINE_RATE BURSTY_WINDOW_RPS BURSTY_WINDOW_SIZE_MS N_BURSTS N_STEPS GAP_S SETTLE_S TARGET; do
   if [ -n "${!v+x}" ]; then OVERRIDES+="$v=${!v}"$'\n'; fi
 done
 # shellcheck disable=SC1090
 source "$CONF"
 while IFS='=' read -r k v; do [ -n "$k" ] && printf -v "$k" %s "$v"; done <<<"$OVERRIDES"
+N_STEPS=${N_STEPS:-1}   # >1 = stepped bursts (bursts.js); confs don't set it
 
 WINDOW_MS=${WINDOW%ms}
 PEAK=$((BASELINE_RATE + BURSTY_WINDOW_RPS))
 CONFIG_ID="w${WINDOW_MS}_bl${BASELINE_RATE}_p${PEAK}_b${BURSTY_WINDOW_SIZE_MS}"
+if [ "$N_STEPS" -gt 1 ]; then CONFIG_ID+="_s$N_STEPS"; fi   # flat-burst dirs keep their names
 CONFIG_DIR=tmp/runs/$CAMPAIGN/$CONFIG_ID
 
 nx() { docker exec "$NODE" "$@"; }
@@ -59,27 +62,36 @@ one_run() {
   cleanup   # no stale daemon / pinned maps from a previous run
 
   {
-    for v in WINDOW MU0 K H_ONSET H_SLACK_MULT BASELINE_RATE BURSTY_WINDOW_RPS BURSTY_WINDOW_SIZE_MS N_BURSTS GAP_S SETTLE_S TAIL_S TARGET; do
+    for v in WINDOW BASELINE_RATE BURSTY_WINDOW_RPS BURSTY_WINDOW_SIZE_MS N_BURSTS N_STEPS GAP_S SETTLE_S TAIL_S TARGET K6_SCRIPT; do
       echo "$v=${!v}"
     done
     echo "CAMPAIGN=$CAMPAIGN"; echo "CONFIG_ID=$CONFIG_ID"; echo "CONF=$CONF"
     echo "START_TIME=$(date -u +%FT%TZ)"
   } >"$RUN/meta.env"
 
-  docker exec -d "$NODE" /usr/local/bin/burst-detector -window "$WINDOW" -mu0 "$MU0" -k "$K" \
-    -h-onset "$H_ONSET" -h-slack-mult "$H_SLACK_MULT" \
+  # Load first, detector second: the detector learns its baseline online (30-window setup), so it
+  # must start on steady baseline traffic. SETTLE_S is a flat baseline (startRate = BASELINE_RATE)
+  # and must cover daemon startup + 30 windows before the first burst.
+  ( k6 run "$K6_SCRIPT" \
+    -e N_BURSTS="$N_BURSTS" -e GAP_S="$GAP_S" -e BURSTY_WINDOW_SIZE_MS="$BURSTY_WINDOW_SIZE_MS" \
+    -e TAIL_S="$TAIL_S" -e BASELINE_RATE="$BASELINE_RATE" -e SETTLE_S="$SETTLE_S" \
+    -e BURSTY_WINDOW_RPS="$BURSTY_WINDOW_RPS" -e TARGET="$TARGET" -e N_STEPS="$N_STEPS" \
+    ${PRE_ALLOC_VUS:+-e PRE_ALLOC_VUS="$PRE_ALLOC_VUS"} ${MAX_VUS:+-e MAX_VUS="$MAX_VUS"} \
+    2>&1 | tee "$RUN/k6.log" >&2 ) &
+  local k6_pid=$!
+  # scenario_start is logged on the first iteration, i.e. once traffic is actually flowing.
+  for _ in $(seq 200); do grep -q scenario_start "$RUN/k6.log" 2>/dev/null && break; sleep 0.05; done
+  grep -q scenario_start "$RUN/k6.log" || { echo "k6 did not start" >&2; kill "$k6_pid"; exit 1; }
+
+  docker exec -d "$NODE" /usr/local/bin/burst-detector -window "$WINDOW" \
     -snapshot-interval "$WINDOW" \
     -attribution-out "/tmp/ebpf-burst-detector/runs/$CAMPAIGN/$CONFIG_ID/$rep/attribution.ndjson"
   # Created empty at startup, so wait for existence, not content.
-  for _ in $(seq 100); do [ -e "$RUN/attribution.ndjson" ] && break; sleep 0.2; done
-  [ -e "$RUN/attribution.ndjson" ] || { echo "detector did not create attribution.ndjson" >&2; exit 1; }
+  for _ in $(seq 100); do [ -e "$RUN/attribution.ndjson" ] && break; sleep 0.05; done
+  [ -e "$RUN/attribution.ndjson" ] || { echo "detector did not create attribution.ndjson" >&2; kill "$k6_pid"; exit 1; }
+  echo "DETECTOR_ARMED_UTC=$(date -u +%FT%T.%NZ)" >>"$RUN/meta.env"
 
-  k6 run loadgen/k6/bursts.js \
-    -e N_BURSTS="$N_BURSTS" -e GAP_S="$GAP_S" -e BURSTY_WINDOW_SIZE_MS="$BURSTY_WINDOW_SIZE_MS" \
-    -e TAIL_S="$TAIL_S" -e BASELINE_RATE="$BASELINE_RATE" -e SETTLE_S="$SETTLE_S" \
-    -e BURSTY_WINDOW_RPS="$BURSTY_WINDOW_RPS" -e TARGET="$TARGET" \
-    ${PRE_ALLOC_VUS:+-e PRE_ALLOC_VUS="$PRE_ALLOC_VUS"} ${MAX_VUS:+-e MAX_VUS="$MAX_VUS"} \
-    2>&1 | tee "$RUN/k6.log" >&2
+  wait "$k6_pid"
 
   sleep "$GRACE_S"
   cleanup

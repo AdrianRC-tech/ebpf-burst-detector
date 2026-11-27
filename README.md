@@ -56,6 +56,7 @@ If either half dies the daemon stops, so the detector never runs on stale maps.
 | tcx multi-attach (`bpf_mprog`) | 6.6 | both `ingress_counter` and `flow_counter`, chained on the same netkit peer device |
 | `bpf_skb_load_bytes_relative` | 4.18 | `flow_counter`'s offset-independent header parse |
 | `BPF_MAP_TYPE_LRU_PERCPU_HASH` | 4.10 | the `flow_stats` per-flow counter map |
+| `bpf_loop` | 5.17 | `cusum_detector`: per-CPU counter sum and `square root computation |
 
 Verify:
 
@@ -178,40 +179,37 @@ docker cp bin/burst-detector burst-detection-lab-worker:/usr/local/bin/burst-det
 
 docker exec -it burst-detection-lab-worker /usr/local/bin/burst-detector \
     --namespaces default \
-    --mu0      500000 \
-    --k        250000 \
-    --h-onset  2000000 \
     --window   10ms
 
-# IF we want to capture per-window byte samples to fine-tune cusum values first
+# Capture per-window byte samples for offline analysis
 docker exec -it burst-detection-lab-worker \
     /usr/local/bin/burst-detector -window 100ms -sample-windows \
     -sample-csv /tmp/windows.csv
 ```
 
-Flags (all CUSUM parameters are baked into `.rodata` at load time — change
-them by restarting the binary, not by editing the running program):
+The baseline is **learned online in kernel**; the window is the only real knob.
+The first 30 windows are a setup phase (no detection). μ/σ then follow
+Welford → EWMA with memory τ = max(10 s, 300·W); `k = σ`, `h_onset = 6σ`
+(σ floored at 1500 B); a window is learned only while quiescent and when
+`x − μ ≤ 3σ`; a burst held longer than τ is force-drained (`reason: timeout`)
+and setup re-runs. Rationale: `docs/design-decisions-cusum-calibration.md` §7.
+Parameters are baked into `.rodata` at load time — change them by restarting.
 
 | Flag | Unit | Meaning |
 |---|---|---|
-| `--mu0` | bytes/window | baseline byte rate per CUSUM window |
-| `--k` | bytes | slack factor — typically half the step you want to detect |
-| `--h-onset` | bytes | threshold on `upper_sum` that triggers onset |
-| `--h-drain` | bytes | static override for the threshold on `lower_sum` that triggers drain (default: derived as `--h-slack-mult × k_drain`; set explicitly only to reproduce pre-derivation runs) |
-| `--h-slack-mult` | dimensionless | drain threshold in slack units, `h_drain = h-slack-mult × k_drain` (default: derived from `h_onset / k`, the onset arm's own operating point) |
-| `--window` | duration | CUSUM window (e.g. `10ms`, `5ms`) |
+| `--window` | duration | CUSUM window (e.g. `10ms`, `5ms`; default `100ms`) |
+| `--h-slack-mult` | dimensionless | drain threshold in slack units, `h_drain = h-slack-mult × k_drain` (default 6, the onset arm's `h_onset / k`) |
 | `--sample-windows` | bool | emit per-window byte samples to CSV for parameter tuning (default off) |
 | `--sample-csv` | path | destination for window sample CSV (default: stderr) |
 
-`--sample-windows` is the **single canonical byte-per-window analysis and
-tuning source for Layer 1** — it captures the exact signal the kernel CUSUM
-consumes, window-aligned and at full resolution. For parameter tuning, run
-with `-window 100ms -sample-windows -sample-csv /tmp/windows.csv`, drive load
-with k6 (`loadgen/k6`), then derive `mu_0`/`k`/`h_*` from the captured per-window byte
-deltas.
+`--sample-windows` is the **single canonical byte-per-window analysis
+source** — it captures the exact signal the kernel CUSUM consumes,
+window-aligned and at full resolution (used by `cmd/baseline-stats` and the
+offline `experiments/analysis/compare_*` replays).
 
 Output is structured JSON to stderr, one line per arming event plus one line
-per onset/drain transition. The detector also exposes a single-byte `burst_flag`
+per onset/drain transition. Each event carries `reason` (`threshold` /
+`timeout`) and the learned `mu` / `sigma` it was judged against. The detector also exposes a single-byte `burst_flag`
 BPF map (0 = quiescent, 1 = burst) as Layer 1's architectural output for
 downstream consumers.
 
@@ -247,7 +245,7 @@ alongside `ingress_counter` on every pod (see above). It's off by default in
 
 ```bash
 docker exec -it burst-detection-lab-worker /usr/local/bin/burst-detector \
-    --mu0 500000 --k 250000 --h-onset 2000000 --window 100ms \
+    --window 100ms \
     --attribution-out /tmp/attribution.ndjson
 ```
 
@@ -270,6 +268,8 @@ nominal interval, so the floor costs temporal resolution in the ring, not
 correctness. Pass `--snapshot-interval` explicitly if you need finer than 50ms.
 
 ### Reading a record
+
+`baseline_mu` / `baseline_sigma` are the learned baseline the onset was judged against.
 
 `timestamp_snapshots_used` gives the stamps of the two snapshots that bounded the window: the newest at or before the onset change point, and the first at or after the drain change point (so each edge is off by at most one snapshot interval). Omitted when the wall-clock anchor failed.
 
@@ -357,7 +357,7 @@ Open http://localhost:3000 → Dashboards → default → *CUSUM Layer 1 Tuning*
 
 | Panel | Purpose |
 |---|---|
-| Node bytes/sec | Primary CUSUM tuning signal; read `mu_0` from the steady-state value |
+| Node bytes/sec | Primary CUSUM input signal (the detector learns its baseline online) |
 | Node packets/sec | Directional context (GRO-coalesced — not wire-exact) |
 | Cilium drop bytes/sec | **Must stay ~0** during load runs; BPF map counter (lossless) — non-zero = lossy measurement |
 
@@ -367,15 +367,6 @@ Open http://localhost:3000 → Dashboards → default → *CUSUM Layer 1 Tuning*
 
 cAdvisor housekeeping runs every ~10 s — **~100× coarser than the 100 ms CUSUM window**. These panels characterise the load-generator *envelope* and steady-state baseline. Actual per-window validation comes from the ring-buffer → offline CSV path.
 
-### Deriving `mu_0`
-
-Run a steady k6 load (`loadgen/k6/staircase.js`) and read off the sustained bytes/sec value for your node:
-
-```
-mu_0 [bytes/window] = bytes_per_sec / 10    # 100 ms windows = 10 windows/sec
-```
-
-Pass to `--mu0` when launching `burst-detector`.
 
 ---
 

@@ -2,19 +2,16 @@ package main
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/cilium/ebpf"
 )
 
-// cusumParams holds the CUSUM tuning parameters baked into the BPF object's
-// .rodata at load time. They cannot be changed after loadCusumDetector returns.
-// A nil pointer means "use the C default baked into the .o file".
+// cusumParams holds the user-set CUSUM parameters baked into the BPF object's
+// .rodata at load time. mu/sigma are learned online in kernel, so only the
+// window is a real knob. A nil pointer means "use the C default".
 type cusumParams struct {
-	Mu0           *uint64 // baseline bytes per window
-	K             *uint64 // slack factor (half the expected step)
-	HOnset        *uint64 // onset threshold (bytes)
-	HDrain        *uint64 // static drain threshold override (bytes); nil/unset derives from HSlackMult * k_drain
-	HSlackMult    *uint64 // drain threshold in slack units (h_drain = h_slack_mult * k_drain); nil derives from h_onset/k
+	HSlackMult    *uint64 // drain threshold in slack units (h_drain = h_slack_mult * k_drain)
 	WindowNs      *uint64 // CUSUM window in nanoseconds
 	SampleWindows *bool   // emit per-window byte samples to the window_samples ringbuf
 }
@@ -24,66 +21,22 @@ type cusumParams struct {
 type detector struct {
 	objs cusumObjects
 
-	// hSlackMult is the effective h_slack_mult value injected into .rodata —
-	// either the caller's explicit override or the value deriveHSlackMult
-	// computed. Recorded here so the caller can log the effective value
-	// (armed-log parameter reconstruction depends on this being visible,
-	// not just "kernel-default").
-	hSlackMult uint64
-
 	// windowNs is the effective CUSUM window in nanoseconds — either the
 	// caller's explicit override or the C .rodata default read back from
 	// spec.Variables. Used as the default flow-snapshot poll interval.
 	windowNs uint64
+	// tauNs and ewmaDiv are the derived baseline memory and its EWMA divisor.
+	tauNs   uint64
+	ewmaDiv uint64
 }
 
-// deriveHSlackMult resolves the drain-side threshold multiplier in slack
-// units (h_drain = h_slack_mult * k_drain — see docs/design-decisions-
-// cusum-calibration.md §5-6, "the key realisation: m is already the onset
-// arm's operating point"). If the caller passed --h-slack-mult explicitly,
-// that value wins unconditionally, matching the override semantics of
-// every other parameter in this file. Otherwise m is derived from the
-// onset arm's own operating point: m = effective_h_onset / effective_k,
-// where "effective" means the flag value when passed, else the C .rodata
-// default read back from spec.Variables.
-func deriveHSlackMult(spec *ebpf.CollectionSpec, params cusumParams) (*uint64, error) {
-	if params.HSlackMult != nil {
-		return params.HSlackMult, nil
-	}
-
-	effectiveHOnset := uint64(0)
-	effectiveK := uint64(0)
-
-	if params.HOnset != nil {
-		effectiveHOnset = *params.HOnset
-	} else {
-		vs, ok := spec.Variables["h_onset"]
-		if !ok {
-			return nil, fmt.Errorf("variable %q not found in BPF object", "h_onset")
-		}
-		if err := vs.Get(&effectiveHOnset); err != nil {
-			return nil, fmt.Errorf("reading variable %q: %w", "h_onset", err)
-		}
-	}
-
-	if params.K != nil {
-		effectiveK = *params.K
-	} else {
-		vs, ok := spec.Variables["k"]
-		if !ok {
-			return nil, fmt.Errorf("variable %q not found in BPF object", "k")
-		}
-		if err := vs.Get(&effectiveK); err != nil {
-			return nil, fmt.Errorf("reading variable %q: %w", "k", err)
-		}
-	}
-
-	if effectiveK == 0 {
-		return nil, fmt.Errorf("deriveHSlackMult: effective_k is zero; cannot compute h_slack_mult")
-	}
-
-	m := effectiveHOnset / effectiveK
-	return &m, nil
+// baselineTau returns the EWMA memory tau = max(10 s, 300 * W) and the
+// divisor D = round(tau / W) the kernel uses as alpha = 1/D once past the
+// Welford phase (docs/design-decisions-cusum-calibration.md §7). tau >= 300 W
+// keeps 1/D <= 1/300, so the weight never increases at the n = 300 switch.
+func baselineTau(windowNs uint64) (tauNs, ewmaDiv uint64) {
+	tauNs = max(uint64(10*time.Second), 300*windowNs)
+	return tauNs, (tauNs + windowNs/2) / windowNs
 }
 
 // loadCusumDetector loads the CUSUM BPF object into the kernel.
@@ -94,35 +47,40 @@ func deriveHSlackMult(spec *ebpf.CollectionSpec, params cusumParams) (*uint64, e
 // the same kernel maps. The caller must have removed the memlock rlimit and
 // created bpfPinDir.
 //
-// Parameter injection: cusumParams values are written to .rodata via the
-// generated cusumVariableSpecs before LoadAndAssign, so the BPF program sees
-// them as `volatile const` constants.
+// Parameter injection: values are written to .rodata via spec.Variables
+// before LoadAndAssign, so the BPF program sees them as `volatile const`.
 func loadCusumDetector(params cusumParams) (*detector, error) {
 	spec, err := loadCusum()
 	if err != nil {
 		return nil, fmt.Errorf("loading bpf collection spec: %w", err)
 	}
+	return loadCusumSpec(spec, params, &ebpf.CollectionOptions{
+		Maps: ebpf.MapOptions{PinPath: bpfPinDir},
+	})
+}
 
-	// h_slack_mult unifies both CUSUM arms onto one shared threshold currency
-	// (see docs/design-decisions-cusum-calibration.md §5-6): when the caller
-	// does not pass --h-slack-mult explicitly, it defaults to the onset arm's
-	// own operating point (h_onset / k), so a different --h-mult at
-	// calibration time propagates to the drain side automatically.
-	hSlackMult, err := deriveHSlackMult(spec, params)
-	if err != nil {
-		return nil, fmt.Errorf("deriving h_slack_mult: %w", err)
+// loadCusumSpec injects params (and the tau-derived ewma_div / t_max_ns)
+// into spec and loads it. Split from loadCusumDetector so tests can load an
+// unpinned copy with the same derivation.
+func loadCusumSpec(spec *ebpf.CollectionSpec, params cusumParams, opts *ebpf.CollectionOptions) (*detector, error) {
+	// The effective window drives tau, so resolve it first: the flag value
+	// when given, else the C .rodata default.
+	var windowNs uint64
+	if params.WindowNs != nil {
+		windowNs = *params.WindowNs
+	} else if err := spec.Variables["window_ns"].Get(&windowNs); err != nil {
+		return nil, fmt.Errorf("reading variable %q: %w", "window_ns", err)
 	}
+	if windowNs == 0 {
+		return nil, fmt.Errorf("window must be > 0")
+	}
+	tauNs, ewmaDiv := baselineTau(windowNs)
 
-	// Rewrite only the .rodata constants that were explicitly provided (or,
-	// for h_slack_mult, derived above). Nil entries keep the C default baked
-	// into the .o file.
 	overrides := map[string]*uint64{
-		"mu_0":         params.Mu0,
-		"k":            params.K,
-		"h_onset":      params.HOnset,
-		"h_drain":      params.HDrain,
-		"h_slack_mult": hSlackMult,
-		"window_ns":    params.WindowNs,
+		"h_slack_mult": params.HSlackMult,
+		"window_ns":    &windowNs,
+		"ewma_div":     &ewmaDiv,
+		"t_max_ns":     &tauNs,
 	}
 	for name, val := range overrides {
 		if val == nil {
@@ -134,23 +92,6 @@ func loadCusumDetector(params cusumParams) (*detector, error) {
 		}
 		if err := vs.Set(*val); err != nil {
 			return nil, fmt.Errorf("setting variable %q: %w", name, err)
-		}
-	}
-
-	// effectiveWindowNs mirrors the hSlackMult pattern above: the flag value
-	// when given, else the C .rodata default read back from spec.Variables.
-	// Used by the caller as the default flow-snapshot poll interval
-	// when --snapshot-interval is not passed.
-	effectiveWindowNs := uint64(0)
-	if params.WindowNs != nil {
-		effectiveWindowNs = *params.WindowNs
-	} else {
-		vs, ok := spec.Variables["window_ns"]
-		if !ok {
-			return nil, fmt.Errorf("variable %q not found in BPF object", "window_ns")
-		}
-		if err := vs.Get(&effectiveWindowNs); err != nil {
-			return nil, fmt.Errorf("reading variable %q: %w", "window_ns", err)
 		}
 	}
 
@@ -167,13 +108,11 @@ func loadCusumDetector(params cusumParams) (*detector, error) {
 	}
 
 	var objs cusumObjects
-	if err := spec.LoadAndAssign(&objs, &ebpf.CollectionOptions{
-		Maps: ebpf.MapOptions{PinPath: bpfPinDir},
-	}); err != nil {
+	if err := spec.LoadAndAssign(&objs, opts); err != nil {
 		return nil, fmt.Errorf("loading and assigning bpf objects: %w", err)
 	}
 
-	return &detector{objs: objs, hSlackMult: *hSlackMult, windowNs: effectiveWindowNs}, nil
+	return &detector{objs: objs, windowNs: windowNs, tauNs: tauNs, ewmaDiv: ewmaDiv}, nil
 }
 
 // seedPrevTotal initialises cusum_state.PrevTotal to the current sum of
@@ -191,7 +130,7 @@ func (d *detector) seedPrevTotal() error {
 		total += v
 	}
 
-	state := cusumCusumStateT{PrevTotal: total} // UpperSum and LowerSum default to zero
+	state := cusumCusumStateT{PrevTotal: total} // everything else zero: n = 0 starts the setup phase
 	if err := d.objs.CusumState.Put(uint32(0), state); err != nil {
 		return fmt.Errorf("seeding cusum_state.prev_total: %w", err)
 	}

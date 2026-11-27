@@ -12,11 +12,14 @@ reaches a pod due to cold start of connections, meanwhile k6 offers VUs pre-allo
   - `bursts.js` — repeated-burst stage shape. Covers scenarios **A** (baseline only, `N_BURSTS=0`),
     **B**/**C** (bursts spaced `GAP_S` apart, abrupt edges), and **E** (`RAMP_MS>0`, gradual
     onset/drain instead of abrupt).
-  - `staircase.js` — scenario **D**: an abrupt up/down staircase from below-baseline to the
-    burst-size rate and back.
+  - `drift.js` — burst-free drifting baseline for the false-positive campaign: a half-sine swell
+    `BASELINE_RATE` → `DRIFT_PEAK_RATE` → `BASELINE_RATE` over `TAIL_S`, plus a seeded,
+    mean-reverting ±`WANDER_PCT`% wander (new knot every `WANDER_STEP_S`). Run by
+    `experiments/run_stable_baselines.sh` via `K6_SCRIPT`; tunables are the `envNum(...)` defaults
+    at the top of the script.
 
-For executing each scenario, only the tunables
-passed via `-e` to `bursts.js` or `staircase.js` need to be set properly.
+Stepped bursts (the old staircase scenario **D**) are `bursts.js` with `N_STEPS>1`. For executing
+each scenario, only the tunables passed via `-e` need to be set properly.
 
 ## Install
 
@@ -53,14 +56,14 @@ k6 run bursts.js -e GAP_S=5 -e BURSTY_WINDOW_SIZE_MS=500 -e BASELINE_RATE=100
 # Scenario C — bursts tightly spaced (1s gap), tests re-arm after a detection
 k6 run bursts.js -e GAP_S=1 -e BURSTY_WINDOW_SIZE_MS=500 -e BASELINE_RATE=100
 
-# Scenario D — staircase: 50->100->150->200->150->100->50 rps, 500ms per step
-k6 run staircase.js -e STEP_MS=500
+# Scenario D — stepped bursts: each 300ms burst climbs to the peak in 3 equal abrupt steps
+k6 run bursts.js -e GAP_S=5 -e BURSTY_WINDOW_SIZE_MS=300 -e N_STEPS=3
 
 # Scenario E — same burst shape as B, but a 7s ramp on onset/drain instead of abrupt edges
 k6 run bursts.js -e GAP_S=5 -e BURSTY_WINDOW_SIZE_MS=500 -e RAMP_MS=7000
 ```
 
-### `bursts.js` tunables (scenarios A/B/C/E)
+### `bursts.js` tunables (scenarios A–E)
 
 | Tunable | Default | Meaning |
 |---|---|---|
@@ -69,6 +72,7 @@ k6 run bursts.js -e GAP_S=5 -e BURSTY_WINDOW_SIZE_MS=500 -e RAMP_MS=7000
 | `BURSTY_WINDOW_RPS` | 100 | **additive** rps during a window; peak = baseline + this |
 | `BURSTY_WINDOW_SIZE_MS` | 800 | window duration (hold-at-peak; excludes ramp) |
 | `RAMP_MS` | 0 | onset/drain transition duration; `0` = abrupt (A/B/C), `>0` = gradual (E) |
+| `N_STEPS` | 1 | split the window into N equal abrupt steps up to the peak (`base+R/N`, …, `base+R`), then drop abruptly; `1` = flat burst. Not combinable with `RAMP_MS>0`. Steps are logged as `plan_step: NNN j <rate>rps start_ns end_ns …` |
 | `N_BURSTS` | 10 | windows per run; 0 = baseline only (A) |
 | `GAP_S` | 10 | baseline seconds between windows — 5 for B, 1 for C |
 | `SETTLE_S` | 100 | baseline lead-in; excluded from analysis |
@@ -76,20 +80,6 @@ k6 run bursts.js -e GAP_S=5 -e BURSTY_WINDOW_SIZE_MS=500 -e RAMP_MS=7000
 | `PRE_ALLOC_VUS` / `MAX_VUS` | 20 / 80 | VU pool |
 | `BURST_MIX` | unset | request mix of the burst's *added* traffic: `search,recommend,user,reserve` fractions, exactly 4 comma-separated values summing to 1 (e.g. `0.1,0.1,0.4,0.4`). Baseline keeps the default 0.6,0.39,0.005,0.005 mix, so during a burst the stream is a blend; unset = no change |
 | `SEED` | 1337 | PRNG seed; same seed reproduces the same request stream |
-
-### `staircase.js` tunables (scenario D)
-
-The staircase shape itself — `[50, 100, 150, 200, 150, 100, 50]` rps — is a hardcoded `LEVELS`
-array in the script, not env-tunable; `STEP_MS` is the only axis meant to vary per run. The
-settle/gap hold rate and `startRate` derive from `LEVELS[0]`, so they move with it if you edit
-the array.
-
-| Tunable | Default | Meaning |
-|---|---|---|
-| `TARGET` | `http://172.18.0.2:30500` | frontend NodePort on the kind bridge |
-| `STEP_MS` | 500 | hold duration per step; transitions are abrupt (0s) |
-| `N_CYCLES` | 1 | how many up/down staircases to run, separated by `GAP_S` |
-| `GAP_S` / `SETTLE_S` / `TAIL_S` / `PRE_ALLOC_VUS` / `MAX_VUS` / `SEED` | same as `bursts.js` | |
 
 ## Output
 
@@ -145,5 +135,5 @@ request (endpoint mix), not requests per second.
 | `-R <rate>` | `startRate` and stage `target` |
 | `-d <seconds>` | stage `duration` — accepts `800ms` |
 | `-D exp` | not needed; arrival-rate executors are open-model and immune to coordinated omission |
-| `-s script.lua` | `bursts.js` / `staircase.js` |
+| `-s script.lua` | `bursts.js` / `drift.js` |
 | N processes in a bash loop | N bursty windows in one stage list, one process |
